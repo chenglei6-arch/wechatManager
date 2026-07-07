@@ -92,10 +92,3 @@ def get_db_salt(db_path: str) -> bytes:
     """读取数据库文件的盐值（前16字节）"""
     with open(db_path, 'rb') as f:
         return f.read(SALT_SIZE)
-
-
-def load_keys(keys_file: str) -> dict:
-    """加载密钥文件 {salt_hex: key_hex}"""
-    import json
-    with open(keys_file, 'r', encoding='utf-8') as f:
-        return json.load(f)

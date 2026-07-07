@@ -2,38 +2,106 @@
 微信消息发送器
 
 使用窗口自动化（非 API）发送消息到指定的联系人或群聊。
+通过 SendInput 模拟键盘鼠标输入，取代已弃用的 keybd_event/mouse_event。
 """
-import sys, os, time, ctypes
+import sys, os, time, ctypes, logging
 from ctypes import wintypes
-import pyperclip
 
+log = logging.getLogger('wx-mcp.sender')
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# ---- SendInput 类型定义 ----
+INPUT_MOUSE = 0
+INPUT_KEYBOARD = 1
 
-def _press(vk):
-    user32.keybd_event(vk, 0, 0, 0)
+KEYEVENTF_KEYDOWN = 0x0000
+KEYEVENTF_KEYUP = 0x0002
+
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+
+# dwExtraInfo 是指针大小（64位=8字节, 32位=4字节）
+ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ('wVk', wintypes.WORD),
+        ('wScan', wintypes.WORD),
+        ('dwFlags', wintypes.DWORD),
+        ('time', wintypes.DWORD),
+        ('dwExtraInfo', ULONG_PTR),
+    ]
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ('dx', wintypes.LONG),
+        ('dy', wintypes.LONG),
+        ('mouseData', wintypes.DWORD),
+        ('dwFlags', wintypes.DWORD),
+        ('time', wintypes.DWORD),
+        ('dwExtraInfo', ULONG_PTR),
+    ]
+
+
+class INPUT_UNION(ctypes.Union):
+    _fields_ = [
+        ('mi', MOUSEINPUT),
+        ('ki', KEYBDINPUT),
+    ]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [
+        ('type', wintypes.DWORD),
+        ('union', INPUT_UNION),
+    ]
+
+
+def _send_key(vk: int, down: bool):
+    """通过 SendInput 发送单个键盘事件"""
+    flags = KEYEVENTF_KEYDOWN if down else KEYEVENTF_KEYUP
+    ki = KEYBDINPUT(vk, 0, flags, 0, 0)
+    inp = INPUT(INPUT_KEYBOARD, INPUT_UNION(ki=ki))
+    result = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    if result != 1:
+        log.warning(f"SendInput key=0x{vk:02X} down={down} 返回 {result}")
+
+
+def _press(vk: int):
+    _send_key(vk, True)
     time.sleep(0.02)
-    user32.keybd_event(vk, 0, 2, 0)
+    _send_key(vk, False)
 
 
-def _ctrl(vk):
-    user32.keybd_event(0x11, 0, 0, 0)
+def _ctrl(vk: int):
+    _send_key(0x11, True)   # Ctrl down
     time.sleep(0.01)
-    user32.keybd_event(vk, 0, 0, 0)
+    _send_key(vk, True)     # key down
     time.sleep(0.03)
-    user32.keybd_event(vk, 0, 2, 0)
+    _send_key(vk, False)    # key up
     time.sleep(0.01)
-    user32.keybd_event(0x11, 0, 2, 0)
+    _send_key(0x11, False)  # Ctrl up
 
 
-def _click(x, y):
+def _click(x: int, y: int):
+    """通过 SendInput 在指定坐标点击鼠标左键"""
     user32.SetCursorPos(x, y)
     time.sleep(0.02)
-    user32.mouse_event(2, 0, 0, 0, 0)
+
+    # 左键按下
+    mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, 0)
+    inp = INPUT(INPUT_MOUSE, INPUT_UNION(mi=mi))
+    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
     time.sleep(0.02)
-    user32.mouse_event(4, 0, 0, 0, 0)
+
+    # 左键抬起
+    mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, 0)
+    inp = INPUT(INPUT_MOUSE, INPUT_UNION(mi=mi))
+    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
 def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
@@ -49,36 +117,44 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
         是否成功
     """
     # 关闭浮动聊天窗口
-    def enum(h, lp):
-        b = ctypes.create_unicode_buffer(256)
-        user32.GetClassNameW(h, b, 256)
-        if b.value == 'Qt51514QWindowIcon':
-            t = ctypes.create_unicode_buffer(256)
-            user32.GetWindowTextW(h, t, 256)
-            if t.value and t.value != '微信' and user32.IsWindowVisible(h):
-                user32.PostMessageW(h, 0x0010, 0, 0)
+    def enum_close_floats(h, lp):
+        try:
+            b = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(h, b, 256)
+            if b.value == 'Qt51514QWindowIcon':
+                t = ctypes.create_unicode_buffer(256)
+                user32.GetWindowTextW(h, t, 256)
+                if t.value and t.value != '微信' and user32.IsWindowVisible(h):
+                    user32.PostMessageW(h, 0x0010, 0, 0)
+        except Exception as e:
+            log.warning(f"enum_close_floats hwnd={h}: {e}")
         return True
     user32.EnumWindows(
-        ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_int)(enum), 0)
+        ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_int)(enum_close_floats), 0)
 
     # 找主窗口
     hwnds = []
 
-    def enum2(h, lp):
-        b = ctypes.create_unicode_buffer(256)
-        user32.GetClassNameW(h, b, 256)
-        if b.value != 'Qt51514QWindowIcon':
-            return True
-        t = ctypes.create_unicode_buffer(256)
-        user32.GetWindowTextW(h, t, 256)
-        if t.value != '微信':
-            return True
-        if user32.IsWindowVisible(h):
-            hwnds.append(h)
+    def enum_find_main(h, lp):
+        try:
+            b = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(h, b, 256)
+            if b.value != 'Qt51514QWindowIcon':
+                return True
+            t = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(h, t, 256)
+            if t.value != '微信':
+                return True
+            if user32.IsWindowVisible(h):
+                hwnds.append(h)
+        except Exception as e:
+            log.warning(f"enum_find_main hwnd={h}: {e}")
         return True
     user32.EnumWindows(
-        ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_int)(enum2), 0)
+        ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_int)(enum_find_main), 0)
+
     if not hwnds:
+        log.warning("找不到微信主窗口")
         return False
     hwnd = hwnds[0]
 
@@ -86,10 +162,15 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
     cur_tid = kernel32.GetCurrentThreadId()
     prev_fg = user32.GetForegroundWindow()
 
-    user32.AttachThreadInput(cur_tid, wx_tid, True)
+    attached = False
     try:
-        # 激活窗口
-        user32.ShowWindow(hwnd, 9)
+        user32.AttachThreadInput(cur_tid, wx_tid, True)
+        attached = True
+    except Exception as e:
+        log.warning(f"AttachThreadInput 失败: {e}")
+
+    try:
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
         user32.SetWindowPos(hwnd, 0, 100, 100, 1000, 700, 0x0040)
         user32.SetForegroundWindow(hwnd)
         user32.BringWindowToTop(hwnd)
@@ -130,20 +211,20 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
         time.sleep(0.15)
 
         if minimize:
-            user32.ShowWindow(hwnd, 6)
+            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
 
         return True
     finally:
-        try:
-            user32.AttachThreadInput(cur_tid, wx_tid, False)
-        except Exception:
-            pass
-        # 恢复前台
+        if attached:
+            try:
+                user32.AttachThreadInput(cur_tid, wx_tid, False)
+            except Exception as e:
+                log.warning(f"AttachThreadInput(Detach) 失败: {e}")
         try:
             if prev_fg and prev_fg != hwnd:
                 user32.SetForegroundWindow(prev_fg)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"恢复前台窗口失败: {e}")
 
 
 def send_batch(tasks: list, message: str = None) -> list:
@@ -166,9 +247,13 @@ def send_batch(tasks: list, message: str = None) -> list:
         else:
             contact, msg = task, message or f"测试{int(time.time())}"
 
-        is_last = (i == total - 1)
-        ok = send_message(contact, msg, minimize=is_last)
-        results.append((contact, ok))
+        try:
+            is_last = (i == total - 1)
+            ok = send_message(contact, msg, minimize=is_last)
+            results.append((contact, ok))
+        except Exception as e:
+            log.error(f"发送给 {contact} 失败: {e}", exc_info=True)
+            results.append((contact, False))
         time.sleep(0.1)
 
     return results

@@ -51,10 +51,21 @@ pip install mcp pycryptodome pymem psutil pyperclip zstandard
 
 ## Usage
 
+### Install (development mode)
+
+```bash
+cd wx-mcp/
+pip install -e .
+```
+
 ### Run as standalone server
 
 ```bash
-python -m wx_mcp.server
+# After pip install -e .
+python -m wx_mcp
+
+# Or via installed entry point
+wx-mcp
 ```
 
 ### Configure with Claude Desktop
@@ -66,7 +77,7 @@ Add to your `claude.json` (Claude Desktop settings):
   "mcpServers": {
     "wechat": {
       "command": "python",
-      "args": ["-m", "wx_mcp.server"],
+      "args": ["-m", "wx_mcp"],
       "env": {
         "PYTHONIOENCODING": "utf-8"
       }
@@ -78,7 +89,7 @@ Add to your `claude.json` (Claude Desktop settings):
 ### Configure with Claude Code
 
 ```bash
-claude mcp add wechat -- python -m wx_mcp.server
+claude mcp add wechat -- python -m wx_mcp
 ```
 
 ## MCP Tools
