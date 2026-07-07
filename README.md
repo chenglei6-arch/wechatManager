@@ -24,6 +24,19 @@ python -m wx_mcp
 
 详细使用说明、功能列表、技术原理、安全设计、开发指南 → **[wx-mcp/README.md](wx-mcp/README.md)**
 
+## 性能概况
+
+| 操作 | 耗时 | 响应 Token 数 |
+|------|------|-------------|
+| 会话初始化（首次连接） | <1ms | ~430 |
+| `wechat_status` | <1ms | ~27 |
+| `list_contacts` (50 个) | ~60ms | ~361 |
+| `get_recent_sessions` (20 个) | ~4ms | ~11 |
+| `read_messages` (30 条) | ~72ms | ~150 |
+| 典型完整工作流（初始化 + 5 次调用） | <200ms | ~1,940 |
+
+> 详细性能数据和图表见 [`token-benchmark.html`](token-benchmark.html)。
+
 ## 项目结构
 
 ```

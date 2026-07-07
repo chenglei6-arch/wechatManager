@@ -81,6 +81,35 @@ python -m wx_mcp
 | `wechat://messages/{talker}` | 聊天记录 (JSON) |
 | `wechat://status` | 运行状态 |
 
+## 性能基准
+
+实测数据（Windows 11, Python 3.14, WeChat 4.x, Intel i7）：
+
+| 指标 | 数值 |
+|------|------|
+| 密钥提取（已登录微信） | <1s，平均 18 个密钥 |
+| 数据库解密（contact + message + session） | <3s |
+| 联系人查询 50 条 | ~60ms |
+| 会话列表 20 条 | ~4ms |
+| 消息读取 30 条 | ~72ms |
+| 消息发送（UIA） | ~1–3s |
+
+### Token 消耗参考
+
+MCP 协议层响应数据量极轻，实测各工具的单次响应 Token 数：
+
+| 场景 | Token 数 |
+|------|---------|
+| 会话初始化（一次性开销） | ~430 |
+| `wechat_status` | ~27 |
+| `list_contacts` (10) | ~72 |
+| `list_contacts` (50) | ~361 |
+| `get_recent_sessions` (10) | ~11 |
+| `read_messages` (5) | ~25 |
+| `read_messages` (30) | ~150 |
+
+以上为 **服务器响应本身** 的 Token 消耗，不含用户输入和 AI 生成回复。详见 [`token-benchmark.html`](../token-benchmark.html)。
+
 ## 项目结构
 
 ```

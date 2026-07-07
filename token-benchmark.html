@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeChat MCP Server — Token 消耗分析</title>
+<style>
+/* -- roles from palette.md -- */
+.viz-root {
+  --surface-1:      #fcfcfb;
+  --page-plane:     #f9f9f7;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #898781;
+  --gridline:       #e1e0d9;
+  --baseline:       #c3c2b7;
+  --border:         rgba(11,11,11,0.10);
+
+  /* categorical (stacked bar segments) */
+  --c1-gray:   #898781;
+  --c2-teal:   #1baf7a;
+  --c3-blue:   #2a78d6;
+  --c4-purple: #4a3aa7;
+  --c5-orange: #eb6834;
+
+  /* sequential green ramp (bar chart) */
+  --seq-200: #9ec5f4;
+  --seq-400: #3987e5;
+  --seq-600: #184f95;
+
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  max-width: 960px;
+  margin: 2rem auto;
+  padding: 1.5rem;
+  background: var(--page-plane);
+  color: var(--text-primary);
+}
+
+@media (prefers-color-scheme: dark) {
+  .viz-root {
+    --surface-1:      #1a1a19;
+    --page-plane:     #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --c1-gray:   #898781;
+    --c2-teal:   #199e70;
+    --c3-blue:   #3987e5;
+    --c4-purple: #9085e9;
+    --c5-orange: #d95926;
+    --seq-200: #1e3a5c;
+    --seq-400: #2a78d6;
+    --seq-600: #3987e5;
+  }
+}
+
+/* -- typography -- */
+h1 { margin: 0 0 0.25rem; font-weight: 600; font-size: 1.5rem; color: var(--text-primary); }
+.subtitle { margin: 0 0 1.5rem; font-size: 0.875rem; color: var(--text-secondary); }
+h2 { margin: 2rem 0 1rem; font-weight: 500; font-size: 1.125rem; }
+
+/* -- chart containers -- */
+.chart-card {
+  background: var(--surface-1);
+  border-radius: 12px;
+  padding: 1.25rem 1.25rem 0.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+.chart-title {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  margin: 0 0 0.75rem;
+  color: var(--text-primary);
+}
+.chart-wrap {
+  position: relative;
+  overflow: visible;
+}
+.chart-wrap svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+/* -- axis & grid -- */
+.axis-label { fill: var(--text-muted); font-size: 11px; }
+.axis-line { stroke: var(--baseline); stroke-width: 1; }
+.grid-line { stroke: var(--gridline); stroke-width: 0.5; }
+.tick-label { fill: var(--text-muted); font-size: 10px; }
+
+/* -- bars (bar chart) -- */
+.bar-seq {
+  rx: 4 4; ry: 4 4;
+  transition: opacity .15s;
+}
+.bar-seq:hover { opacity: .85; }
+.bar-label {
+  font-size: 11px;
+  font-weight: 500;
+  fill: var(--text-primary);
+  dominant-baseline: middle;
+}
+
+/* -- stacked bars -- */
+.stack-segment { transition: opacity .15s; }
+.stack-segment:hover { opacity: .85; }
+.stack-total-label {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--text-primary);
+}
+.seg-label {
+  font-size: 10px;
+  font-weight: 500;
+  fill: white;
+  dominant-baseline: middle;
+}
+
+/* -- tooltip -- */
+.tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--text-primary);
+  color: var(--surface-1);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity .15s;
+  z-index: 10;
+}
+.tooltip.show { opacity: 1; }
+
+/* -- legend -- */
+.legend { display: flex; flex-wrap: wrap; gap: 0.75rem 1.25rem; justify-content: center; margin-top: 1rem; }
+.legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-secondary); }
+.legend-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+
+/* -- table -- */
+.data-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 0.5rem 0; }
+.data-table th { text-align: left; padding: 6px 8px; font-weight: 500; color: var(--text-muted); border-bottom: 1px solid var(--gridline); }
+.data-table td { padding: 5px 8px; border-bottom: 1px solid var(--gridline); color: var(--text-secondary); }
+.data-table td:last-child { text-align: right; }
+.data-table tr:last-child td { border-bottom: none; }
+.data-table .num { font-variant-numeric: tabular-nums; text-align: right; }
+</style>
+</head>
+<body class="viz-root">
+
+<h1>WeChat MCP Server — Token 消耗分析</h1>
+<p class="subtitle">数据来源：实测微信 4.x PC 版 · 环境：Windows 11, Python 3.14, MCP 协议 stdio 模式</p>
+
+<!-- ===== Chart 1: Bar chart ===== -->
+<div class="chart-card">
+  <div class="chart-title">单次工具调用的 Token 消耗</div>
+  <div class="chart-wrap" id="chart1-wrap">
+    <svg viewBox="0 0 700 340" id="chart1">
+      <line x1="60" y1="280" x2="680" y2="280" class="axis-line"/>
+      <!-- grid lines -->
+      <line x1="60" y1="40" x2="680" y2="40" class="grid-line"/>
+      <line x1="60" y1="100" x2="680" y2="100" class="grid-line"/>
+      <line x1="60" y1="160" x2="680" y2="160" class="grid-line"/>
+      <line x1="60" y1="220" x2="680" y2="220" class="grid-line"/>
+      <!-- Y axis labels -->
+      <text x="54" y="44" class="tick-label" text-anchor="end">400</text>
+      <text x="54" y="104" class="tick-label" text-anchor="end">300</text>
+      <text x="54" y="164" class="tick-label" text-anchor="end">200</text>
+      <text x="54" y="224" class="tick-label" text-anchor="end">100</text>
+      <text x="54" y="284" class="tick-label" text-anchor="end">0</text>
+    </svg>
+    <div class="tooltip" id="tt1"></div>
+  </div>
+</div>
+
+<!-- ===== Chart 2: Stacked bar ===== -->
+<div class="chart-card">
+  <div class="chart-title">典型使用场景 Token 总消耗</div>
+  <div class="chart-wrap" id="chart2-wrap">
+    <svg viewBox="0 0 700 320" id="chart2">
+      <line x1="80" y1="250" x2="680" y2="250" class="axis-line"/>
+      <line x1="80" y1="50" x2="680" y2="50" class="grid-line"/>
+      <line x1="80" y1="100" x2="680" y2="100" class="grid-line"/>
+      <line x1="80" y1="150" x2="680" y2="150" class="grid-line"/>
+      <line x1="80" y1="200" x2="680" y2="200" class="grid-line"/>
+      <text x="74" y="54" class="tick-label" text-anchor="end">2000</text>
+      <text x="74" y="104" class="tick-label" text-anchor="end">1500</text>
+      <text x="74" y="154" class="tick-label" text-anchor="end">1000</text>
+      <text x="74" y="204" class="tick-label" text-anchor="end">500</text>
+      <text x="74" y="254" class="tick-label" text-anchor="end">0</text>
+    </svg>
+    <div class="tooltip" id="tt2"></div>
+  </div>
+  <!-- Legend -->
+  <div class="legend">
+    <span class="legend-item"><span class="legend-swatch" style="background:var(--c1-gray)"></span>初始化 (Session Init)</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:var(--c2-teal)"></span>状态检查</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:var(--c3-blue)"></span>联系人</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:var(--c4-purple)"></span>会话列表</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:var(--c5-orange)"></span>读取消息</span>
+  </div>
+</div>
+
+<!-- ===== Table ===== -->
+<div class="chart-card">
+  <div class="chart-title">原始数据明细</div>
+  <table class="data-table">
+    <thead>
+      <tr><th>类别</th><th>操作</th><th>响应字符数</th><th>预估 Token 数</th><th>耗时</th></tr>
+    </thead>
+    <tbody>
+      <tr><td rowspan="3">会话初始化</td><td>initialize 响应</td><td class="num">185</td><td class="num">46</td><td class="num">&lt;1ms</td></tr>
+      <tr><td>tools/list 响应</td><td class="num">1,251</td><td class="num">313</td><td class="num">&lt;1ms</td></tr>
+      <tr><td>resources/list 响应</td><td class="num">283</td><td class="num">71</td><td class="num">&lt;1ms</td></tr>
+      <tr><td colspan="2" style="font-weight:500">小计（单次会话）</td><td class="num" style="font-weight:500">1,719</td><td class="num" style="font-weight:500">430</td><td class="num" style="font-weight:500">—</td></tr>
+      <tr><td rowspan="6">工具调用</td><td>wechat_status</td><td class="num">108</td><td class="num">27</td><td class="num">&lt;1ms</td></tr>
+      <tr><td>list_contacts (limit=10)</td><td class="num">289</td><td class="num">72</td><td class="num">12ms</td></tr>
+      <tr><td>list_contacts (limit=50)</td><td class="num">1,445</td><td class="num">361</td><td class="num">60ms</td></tr>
+      <tr><td>get_recent_sessions (limit=10)</td><td class="num">44</td><td class="num">11</td><td class="num">4ms</td></tr>
+      <tr><td>read_messages (limit=5)</td><td class="num">~100</td><td class="num">~25</td><td class="num">12ms</td></tr>
+      <tr><td>read_messages (limit=30)</td><td class="num">~600</td><td class="num">~150</td><td class="num">72ms</td></tr>
+      <tr><td rowspan="4">场景模拟</td><td>最小查询（1 次状态检查）</td><td class="num">—</td><td class="num">456</td><td class="num">—</td></tr>
+      <tr><td>轻度使用（状态 + 查找联系人 ×2）</td><td class="num">—</td><td class="num">600</td><td class="num">—</td></tr>
+      <tr><td>中度使用（状态 + 联系人 + 会话 + 消息 ×2）</td><td class="num">—</td><td class="num">839</td><td class="num">—</td></tr>
+      <tr><td>重度使用（状态 + 联系人 ×2 + 会话 + 消息 ×5）</td><td class="num">—</td><td class="num">1,939</td><td class="num">—</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="subtitle" style="text-align:center;margin-top:1.5rem">
+  MCP Server 响应本身的 Token 消耗 · 不含用户输入和 AI 生成回复的 Token<br>
+  初始化开销仅首次连接产生，后续工具调用仅计单次响应开销
+</p>
+
+<script>
+// ===== Chart 1: Bar chart =====
+(() => {
+  const data = [
+    { label: '状态检查', value: 27, cat: 'wechat_status' },
+    { label: '联系人\n(10 个)', value: 72, cat: 'list_contacts(10)' },
+    { label: '联系人\n(50 个)', value: 361, cat: 'list_contacts(50)' },
+    { label: '会话列表\n(10 个)', value: 11, cat: 'get_recent_sessions' },
+    { label: '读取消息\n(5 条)', value: 25, cat: 'read_messages(5)' },
+    { label: '读取消息\n(30 条)', value: 150, cat: 'read_messages(30)' },
+  ];
+  const svg = document.getElementById('chart1');
+  const tt = document.getElementById('tt1');
+  const wrap = document.getElementById('chart1-wrap');
+  const barW = 52, gap = 8, maxH = 228, baseY = 280, startX = 88;
+
+  data.forEach((d, i) => {
+    const h = Math.max((d.value / 380) * maxH, 6);
+    const x = startX + i * (barW + gap);
+    const y = baseY - h;
+    const barH = h;
+
+    // Color: sequential green
+    let fill;
+    if (d.value <= 30) fill = 'var(--seq-200)';
+    else if (d.value <= 100) fill = 'var(--seq-400)';
+    else fill = 'var(--seq-600)';
+
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', x);
+    rect.setAttribute('y', y);
+    rect.setAttribute('width', barW);
+    rect.setAttribute('height', barH);
+    rect.setAttribute('fill', fill);
+    rect.setAttribute('class', 'bar-seq');
+    rect.setAttribute('rx', '4');
+    rect.setAttribute('ry', '4');
+    svg.appendChild(rect);
+
+    // Label on top
+    const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    txt.setAttribute('x', x + barW / 2);
+    txt.setAttribute('y', y - 6);
+    txt.setAttribute('text-anchor', 'middle');
+    txt.setAttribute('class', 'bar-label');
+    txt.textContent = d.value + ' tokens';
+    svg.appendChild(txt);
+
+    // X axis label
+    const lines = d.label.split('\n');
+    lines.forEach((line, li) => {
+      const lt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      lt.setAttribute('x', x + barW / 2);
+      lt.setAttribute('y', baseY + 16 + li * 14);
+      lt.setAttribute('text-anchor', 'middle');
+      lt.setAttribute('class', 'tick-label');
+      lt.textContent = line;
+      svg.appendChild(lt);
+    });
+
+    // Hover
+    rect.addEventListener('mouseenter', (e) => {
+      tt.textContent = `${d.cat}: ${d.value} tokens (${Math.round(d.value * 4)} chars)`;
+      tt.classList.add('show');
+    });
+    rect.addEventListener('mousemove', (e) => {
+      const r = wrap.getBoundingClientRect();
+      tt.style.left = (e.clientX - r.left + 12) + 'px';
+      tt.style.top = (e.clientY - r.top - 30) + 'px';
+    });
+    rect.addEventListener('mouseleave', () => tt.classList.remove('show'));
+  });
+})();
+
+// ===== Chart 2: Stacked bar chart =====
+(() => {
+  const scenarios = [
+    {
+      label: '最小查询', segments: [
+        { name: '初始化', value: 430, color: 'var(--c1-gray)' },
+        { name: '状态检查', value: 27, color: 'var(--c2-teal)' },
+      ]
+    },
+    {
+      label: '轻度使用', segments: [
+        { name: '初始化', value: 430, color: 'var(--c1-gray)' },
+        { name: '状态检查', value: 27, color: 'var(--c2-teal)' },
+        { name: '联系人\n×2', value: 144, color: 'var(--c3-blue)' },
+      ]
+    },
+    {
+      label: '中度使用', segments: [
+        { name: '初始化', value: 430, color: 'var(--c1-gray)' },
+        { name: '状态检查', value: 27, color: 'var(--c2-teal)' },
+        { name: '联系人', value: 72, color: 'var(--c3-blue)' },
+        { name: '会话列表', value: 11, color: 'var(--c4-purple)' },
+        { name: '消息\n×2', value: 300, color: 'var(--c5-orange)' },
+      ]
+    },
+    {
+      label: '重度使用', segments: [
+        { name: '初始化', value: 430, color: 'var(--c1-gray)' },
+        { name: '状态检查', value: 27, color: 'var(--c2-teal)' },
+        { name: '联系人\n×2', value: 722, color: 'var(--c3-blue)' },
+        { name: '会话列表', value: 11, color: 'var(--c4-purple)' },
+        { name: '消息\n×5', value: 750, color: 'var(--c5-orange)' },
+      ]
+    },
+  ];
+
+  const svg = document.getElementById('chart2');
+  const tt = document.getElementById('tt2');
+  const wrap = document.getElementById('chart2-wrap');
+  const maxVal = 2000;
+  const chartW = 560, baseY = 250;
+  const barW = 98, gap = 20, startX = 120;
+  const maxBarH = 184;
+
+  scenarios.forEach((s, si) => {
+    const total = s.segments.reduce((a, b) => a + b.value, 0);
+    const barH = (total / maxVal) * maxBarH;
+    const x = startX + si * (barW + gap);
+    let yAcc = baseY;
+
+    // Draw segments bottom-up
+    const reversed = [...s.segments].reverse();
+    reversed.forEach((seg) => {
+      const h = Math.max((seg.value / maxVal) * maxBarH, 4);
+      yAcc -= h;
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('x', x);
+      rect.setAttribute('y', yAcc);
+      rect.setAttribute('width', barW);
+      rect.setAttribute('height', h);
+      rect.setAttribute('fill', seg.color);
+      rect.setAttribute('class', 'stack-segment');
+      rect.setAttribute('rx', '3');
+      rect.setAttribute('ry', '3');
+      if (seg !== reversed[0]) {
+        // 2px surface gap at top of segment (except bottommost)
+        rect.setAttribute('y', yAcc + 2);
+        rect.setAttribute('height', h - 2);
+      }
+      svg.appendChild(rect);
+
+      // Segment label (only if tall enough)
+      if (h > 18) {
+        const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        txt.setAttribute('x', x + barW / 2);
+        txt.setAttribute('y', yAcc + h / 2);
+        txt.setAttribute('text-anchor', 'middle');
+        txt.setAttribute('class', 'seg-label');
+        txt.textContent = seg.value;
+        svg.appendChild(txt);
+      }
+
+      // Hover
+      rect.addEventListener('mouseenter', () => {
+        tt.textContent = `${seg.name}: ${seg.value} tokens`;
+        tt.classList.add('show');
+      });
+      rect.addEventListener('mousemove', (e) => {
+        const r = wrap.getBoundingClientRect();
+        tt.style.left = (e.clientX - r.left + 12) + 'px';
+        tt.style.top = (e.clientY - r.top - 30) + 'px';
+      });
+      rect.addEventListener('mouseleave', () => tt.classList.remove('show'));
+    });
+
+    // Total on top
+    const totalTxt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    totalTxt.setAttribute('x', x + barW / 2);
+    totalTxt.setAttribute('y', yAcc - 8);
+    totalTxt.setAttribute('text-anchor', 'middle');
+    totalTxt.setAttribute('class', 'stack-total-label');
+    totalTxt.textContent = total + ' tks';
+    svg.appendChild(totalTxt);
+
+    // X axis label
+    const lt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    lt.setAttribute('x', x + barW / 2);
+    lt.setAttribute('y', baseY + 18);
+    lt.setAttribute('text-anchor', 'middle');
+    lt.setAttribute('class', 'tick-label');
+    lt.textContent = s.label;
+    svg.appendChild(lt);
+  });
+})();
+</script>
+</body>
+</html>
