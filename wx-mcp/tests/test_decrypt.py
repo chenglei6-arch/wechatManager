@@ -153,7 +153,7 @@ class TestDecryptDatabase(unittest.TestCase):
 
     def test_decrypt_database_nonexistent_file(self):
         """不存在的文件应返回 False"""
-        result = decrypt_database('/nonexistent/path.db', '/tmp/out.db', b'\x00' * 32)
+        result = decrypt_database('/nonexistent/path.db', 'NUL', b'\x00' * 32)
         self.assertFalse(result)
 
     def test_decrypt_database_too_small(self):
@@ -162,7 +162,8 @@ class TestDecryptDatabase(unittest.TestCase):
             f.write(b'\x00' * 100)
             path = f.name
         try:
-            result = decrypt_database(path, '/tmp/out.db', b'\x00' * 32)
+            out = os.path.join(tempfile.gettempdir(), 'out.db')
+            result = decrypt_database(path, out, b'\x00' * 32)
             self.assertFalse(result)
         finally:
             os.unlink(path)
