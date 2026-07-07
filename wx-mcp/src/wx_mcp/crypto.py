@@ -17,8 +17,19 @@ class DATA_BLOB(ctypes.Structure):
         ('pbData', ctypes.POINTER(ctypes.c_byte)),
     ]
 
+    def __init__(self, data: bytes = b''):
+        """从 bytes 构造 DATA_BLOB"""
+        super().__init__()
+        if data:
+            self.cbData = len(data)
+            self.pbData = ctypes.cast(data, ctypes.POINTER(ctypes.c_byte))
+        else:
+            self.cbData = 0
+            self.pbData = None
+
 
 _crypt32 = ctypes.windll.crypt32
+_kernel32 = ctypes.windll.kernel32
 
 
 def encrypt(data: bytes) -> bytes:
@@ -31,7 +42,7 @@ def encrypt(data: bytes) -> bytes:
     Returns:
         密文（二进制 blob，只能由同一用户解密）
     """
-    blob_in = DATA_BLOB(len(data), ctypes.cast(data, ctypes.POINTER(ctypes.c_byte)))
+    blob_in = DATA_BLOB(data)
     blob_out = DATA_BLOB()
     if not _crypt32.CryptProtectData(
         ctypes.byref(blob_in),
@@ -42,10 +53,10 @@ def encrypt(data: bytes) -> bytes:
         CRYPTPROTECT_UI_FORBIDDEN,
         ctypes.byref(blob_out),
     ):
-        raise ctypes.WinError(f"CryptProtectData 失败 (error={ctypes.get_last_error()})")
+        raise ctypes.WinError(ctypes.get_last_error())
 
     result = ctypes.string_at(blob_out.pbData, blob_out.cbData)
-    _crypt32.LocalFree(blob_out.pbData)
+    _kernel32.LocalFree(blob_out.pbData)
     return result
 
 
@@ -59,7 +70,7 @@ def decrypt(data: bytes) -> bytes:
     Returns:
         明文数据
     """
-    blob_in = DATA_BLOB(len(data), ctypes.cast(data, ctypes.POINTER(ctypes.c_byte)))
+    blob_in = DATA_BLOB(data)
     blob_out = DATA_BLOB()
     if not _crypt32.CryptUnprotectData(
         ctypes.byref(blob_in),
@@ -70,10 +81,10 @@ def decrypt(data: bytes) -> bytes:
         CRYPTPROTECT_UI_FORBIDDEN,
         ctypes.byref(blob_out),
     ):
-        raise ctypes.WinError(f"CryptUnprotectData 失败 (error={ctypes.get_last_error()})")
+        raise ctypes.WinError(ctypes.get_last_error())
 
     result = ctypes.string_at(blob_out.pbData, blob_out.cbData)
-    _crypt32.LocalFree(blob_out.pbData)
+    _kernel32.LocalFree(blob_out.pbData)
     return result
 
 

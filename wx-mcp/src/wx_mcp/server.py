@@ -44,6 +44,24 @@ DECRYPTED_DIR = os.path.join(PROJECT_DIR, 'decrypted')
 WECHAT_DATA_DIR = os.path.expanduser('~/Documents/xwechat_files')
 DB_STORAGE_DIR = None  # 自动检测
 
+# 需要解密的数据库文件（相对于 DB_STORAGE_DIR）
+_REQUIRED_DBS = [
+    'contact/contact.db',
+    'message/message_0.db',
+    'message/message_1.db',
+    'session/session.db',
+]
+
+# 消息类型 → 中文标签映射
+_MSG_TYPE_LABELS = {
+    1: '文本',
+    3: '图片',
+    34: '语音',
+    47: '表情',
+    49: '分享',
+    10000: '系统',
+}
+
 # ---- 模块级缓存 + 锁 ----
 _reader_instance = None
 _reader_decrypted_dir = None
@@ -125,15 +143,9 @@ def ensure_decrypted():
 
         keys = _ensure_keys()
 
-        needed_dbs = [
-            'contact/contact.db',
-            'message/message_0.db',
-            'message/message_1.db',
-            'session/session.db',
-        ]
         os.makedirs(DECRYPTED_DIR, exist_ok=True)
 
-        for rel in needed_dbs:
+        for rel in _REQUIRED_DBS:
             src = os.path.join(DB_STORAGE_DIR, rel)
             dst = os.path.join(DECRYPTED_DIR, rel)
             if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
@@ -272,7 +284,7 @@ def read_messages(talker: str, limit: int = 30) -> str:
             content = str(m.get('content', '')) or ''
             msg_time = m.get('time', '')
 
-            type_map = {1: '文本', 3: '图片', 34: '语音', 47: '表情', 49: '分享', 10000: '系统'}
+            type_map = _MSG_TYPE_LABELS
             t = type_map.get(msg_type, f'type{msg_type}')
 
             if msg_type == 1:
@@ -337,7 +349,7 @@ def wechat_status() -> str:
 
         status = []
         status.append(f"微信进程: {'✅ 运行中' if pid else '❌ 未运行'}")
-        status.append(f"数据目录: {'✅ ' + DB_STORAGE_DIR if db_dir else '❌ 未找到'}")
+        status.append(f"数据目录: {'✅ ' + (db_dir or '') if db_dir else '❌ 未找到'}")
         status.append(f"密钥文件: {'✅ ' + KEYS_FILE if keys_loaded else '❌ 未提取'}")
         status.append(f"解密数据: {'✅ ' + DECRYPTED_DIR if decrypted else '❌ 未解密'}")
 

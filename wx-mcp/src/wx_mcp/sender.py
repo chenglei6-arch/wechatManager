@@ -18,16 +18,129 @@ log = logging.getLogger('wx-mcp.sender')
 # 控件搜索深度（Qt 嵌套层级较深）
 _SEARCH_DEPTH = 8
 
+# UI 操作等待超时（秒）
+_WAIT_SHORT = 0.5
+_WAIT_MEDIUM = 2.0
+_WAIT_LONG = 5.0
+
+# 轮询间隔（秒）
+_POLL_INTERVAL = 0.1
+
+
+def _wait_for(
+    condition_fn,
+    timeout: float = _WAIT_MEDIUM,
+    interval: float = _POLL_INTERVAL,
+) -> bool:
+    """轮询等待直到 condition_fn() 返回真值，超时返回 False"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = condition_fn()
+        if result:
+            return True
+        time.sleep(interval)
+    return False
+
+
+def _find_window(retries: int = 2) -> Optional[auto.WindowControl]:
+    """查找微信主窗口，带重试"""
+    for attempt in range(retries + 1):
+        wechat = auto.WindowControl(Name='微信', searchDepth=1)
+        if wechat.Exists(maxSearchSeconds=_WAIT_SHORT):
+            return wechat
+        if attempt < retries:
+            log.info(f"未找到微信窗口，第 {attempt + 1} 次重试...")
+            time.sleep(_WAIT_SHORT)
+    log.warning("找不到微信窗口（已重试 %d 次）", retries)
+    return None
+
+
+def _ensure_window_restored(wechat: auto.WindowControl) -> bool:
+    """如果窗口最小化则恢复窗口"""
+    try:
+        pattern = wechat.GetWindowPattern()
+        if pattern:
+            state = pattern.CurrentVisualState
+            if state == auto.VisualState.Minimized:
+                log.info("微信窗口已最小化，尝试恢复")
+                pattern.SetVisualState(auto.VisualState.Normal)
+                time.sleep(0.3)
+        return True
+    except Exception as e:
+        log.debug(f"窗口状态操作失败: {e}")
+        return False
+
+
+def _search_contact(wechat: auto.WindowControl, chat_name: str) -> bool:
+    """在微信搜索框中搜索联系人，返回是否成功"""
+    search = wechat.EditControl(searchDepth=_SEARCH_DEPTH)
+    if not search.Exists(maxSearchSeconds=_WAIT_MEDIUM):
+        log.warning("找不到搜索框")
+        return False
+
+    # 优先 ValuePattern（不抢焦点）；备选 Click + SendKeys
+    if not _set_text_via_value_pattern(search, chat_name):
+        try:
+            search.Click()
+            time.sleep(_POLL_INTERVAL)
+            search.SendKeys('{Ctrl}a', waitTime=0.1)
+            search.SendKeys(chat_name, waitTime=0.3)
+        except Exception as e:
+            log.error(f"搜索框输入失败: {e}")
+            return False
+
+    # 等待搜索结果出现（动态等待取代固定 sleep）
+    found = _wait_for(
+        lambda: (
+            wechat.ListItemControl(Name=chat_name, searchDepth=_SEARCH_DEPTH).Exists(maxSearchSeconds=0)
+            # 也可以接受搜索结果第一条（名称包含搜索词）
+        ),
+        timeout=2.0,
+    )
+    if not found:
+        log.warning(f"搜索联系人 '{chat_name}' 未出现结果")
+    return True
+
+
+def _open_chat(wechat: auto.WindowControl, chat_name: str) -> bool:
+    """点击搜索结果中的联系人打开聊天窗口"""
+    try:
+        target = wechat.ListItemControl(Name=chat_name, searchDepth=_SEARCH_DEPTH)
+        if target.Exists(maxSearchSeconds=_WAIT_SHORT):
+            target.Click()
+            return True
+
+        # 备选：直接按 Enter（默认选中第一个结果）
+        search = wechat.EditControl(searchDepth=_SEARCH_DEPTH)
+        if search.Exists(maxSearchSeconds=0):
+            search.SendKeys('{Enter}', waitTime=0.5)
+            return True
+    except Exception as e:
+        log.debug(f"联系人选择失败: {e}")
+        # 最后的备选
+        try:
+            search = wechat.EditControl(searchDepth=_SEARCH_DEPTH)
+            if search.Exists(maxSearchSeconds=0):
+                search.SendKeys('{Enter}', waitTime=0.5)
+                return True
+        except Exception:
+            pass
+    return False
+
 
 def _find_send_button(window: auto.WindowControl) -> Optional[auto.Control]:
     """找发送按钮 — 尝试多种查找策略"""
     # 策略1: 按名称查找
     btn = window.ButtonControl(Name='发送', searchDepth=_SEARCH_DEPTH)
-    if btn.Exists(maxSearchSeconds=0.5):
+    if btn.Exists(maxSearchSeconds=_WAIT_SHORT):
         return btn
     # 策略2: 按 AutomationId (部分 Qt 版本)
     btn = window.Control(AutomationId='SendButton', searchDepth=_SEARCH_DEPTH)
-    if btn.Exists(maxSearchSeconds=0.5):
+    if btn.Exists(maxSearchSeconds=_WAIT_SHORT):
+        return btn
+    # 策略3: 按 class name (某些微信版本)
+    btn = window.Control(ClassName='QPushButton', searchDepth=_SEARCH_DEPTH)
+    if btn.Exists(maxSearchSeconds=_WAIT_SHORT):
         return btn
     return None
 
@@ -36,15 +149,15 @@ def _find_input_area(window: auto.WindowControl) -> Optional[auto.Control]:
     """找消息输入框 — 尝试多种控件类型"""
     # 策略1: EditControl
     edit = window.EditControl(searchDepth=_SEARCH_DEPTH)
-    if edit.Exists(maxSearchSeconds=0.5):
+    if edit.Exists(maxSearchSeconds=_WAIT_SHORT):
         return edit
     # 策略2: DocumentControl (Qt QTextEdit/QTextDocument)
     doc = window.DocumentControl(searchDepth=_SEARCH_DEPTH)
-    if doc.Exists(maxSearchSeconds=0.5):
+    if doc.Exists(maxSearchSeconds=_WAIT_SHORT):
         return doc
     # 策略3: 直接找最后一个可编辑的控件
-    all_edits = window.GetChildren()
-    for c in all_edits:
+    all_children = window.GetChildren()
+    for c in all_children:
         if c.ControlType in (auto.ControlType.EditControl, auto.ControlType.DocumentControl):
             return c
     return None
@@ -91,6 +204,17 @@ def _invoke_button(btn: auto.Control) -> bool:
         return False
 
 
+def _restore_previous_focus(prev_handle: Optional[int], wechat_handle: int):
+    """恢复之前的前台窗口（静默失败）"""
+    if prev_handle and prev_handle != wechat_handle:
+        try:
+            prev_control = auto.ControlFromHandle(prev_handle)
+            if prev_control.Exists(maxSearchSeconds=0):
+                prev_control.SetFocus()
+        except Exception:
+            pass  # 原窗口可能已关闭，忽略
+
+
 def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
     """
     发送微信消息
@@ -106,61 +230,31 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
     Returns:
         是否成功
     """
-    # 找微信主窗口
-    wechat = auto.WindowControl(Name='微信', searchDepth=1)
-    if not wechat.Exists(maxSearchSeconds=3):
-        log.warning("找不到微信窗口")
+    if not chat_name or not text:
+        log.warning("send_message 收到空参数: chat_name=%r, text=%r", chat_name, text)
+        return False
+
+    # 找微信主窗口（带重试）
+    wechat = _find_window(retries=2)
+    if wechat is None:
         return False
 
     # 记录当前焦点窗口，以便后续恢复
     prev_focus = auto.GetForegroundWindow()
 
     # 如果窗口最小化，需要恢复才能交互
-    try:
-        pattern = wechat.GetWindowPattern()
-        if pattern:
-            visual_state = pattern.CurrentVisualState
-            if visual_state == auto.VisualState.Minimized:
-                log.info("微信窗口已最小化，尝试恢复")
-                pattern.SetVisualState(auto.VisualState.Normal)
-                time.sleep(0.3)
-    except Exception as e:
-        log.debug(f"WindowPattern 操作失败: {e}")
+    _ensure_window_restored(wechat)
 
     # ---- 步骤1: 搜索联系人 ----
-    search = wechat.EditControl(searchDepth=_SEARCH_DEPTH)
-    if not search.Exists(maxSearchSeconds=2):
-        log.warning("找不到搜索框")
+    if not _search_contact(wechat, chat_name):
         return False
 
-    # 先尝试 ValuePattern 写入联系人名（不抢焦点）
-    if not _set_text_via_value_pattern(search, chat_name):
-        # 备选：Click + SendKeys
-        try:
-            search.Click()
-            time.sleep(0.1)
-            search.SendKeys('{Ctrl}a', waitTime=0.1)
-            search.SendKeys(chat_name, waitTime=0.3)
-        except Exception as e:
-            log.error(f"搜索框输入失败: {e}")
-            return False
-
-    time.sleep(0.5)
-
     # ---- 步骤2: 打开聊天 ----
-    # 尝试在搜索结果中找到对应联系人并点击
-    try:
-        target = wechat.ListItemControl(Name=chat_name, searchDepth=_SEARCH_DEPTH)
-        if target.Exists(maxSearchSeconds=1):
-            target.Click()
-        else:
-            # 备选：直接按 Enter（默认选择第一个结果）
-            search.SendKeys('{Enter}', waitTime=0.5)
-    except Exception as e:
-        log.debug(f"联系人选择失败: {e}")
-        search.SendKeys('{Enter}', waitTime=0.5)
+    if not _open_chat(wechat, chat_name):
+        return False
 
-    time.sleep(0.5)
+    # 等待聊天窗口加载
+    time.sleep(0.3)
 
     # ---- 步骤3: 在输入框中写入消息 ----
     input_area = _find_input_area(wechat)
@@ -168,9 +262,8 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
         log.warning("找不到消息输入框")
         return False
 
-    # 尝试 ValuePattern（不碰剪贴板）
+    # 优先 ValuePattern（不碰剪贴板）；备选 SendKeys
     if not _set_text_via_value_pattern(input_area, text):
-        # 备选：SendKeys
         if not _set_text_via_sendkeys(input_area, text):
             log.error("消息输入失败")
             return False
@@ -182,7 +275,7 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
     if send_btn is not None:
         _invoke_button(send_btn)
     else:
-        # 备选：Enter 键发送
+        # 找不到发送按钮时用 Enter 发送
         try:
             input_area.SendKeys('{Enter}', waitTime=0.2)
         except Exception as e:
@@ -201,13 +294,7 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
             log.debug(f"最小化失败: {e}")
 
     # 恢复之前的前台窗口
-    try:
-        if prev_focus and prev_focus != wechat.NativeWindowHandle:
-            prev_control = auto.ControlFromHandle(prev_focus)
-            if prev_control.Exists(maxSearchSeconds=0):
-                prev_control.SetFocus()
-    except Exception:
-        pass
+    _restore_previous_focus(prev_focus, wechat.NativeWindowHandle)
 
     return True
 
@@ -223,6 +310,10 @@ def send_batch(tasks: list, message: Optional[str] = None) -> List[Tuple[str, bo
     Returns:
         [(联系人, 是否成功), ...]
     """
+    if not tasks:
+        log.warning("send_batch 收到空列表")
+        return []
+
     results: List[Tuple[str, bool]] = []
     total = len(tasks)
 

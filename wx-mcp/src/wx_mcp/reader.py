@@ -19,6 +19,12 @@ import zstandard as zstd
 
 log = logging.getLogger('wx-mcp.reader')
 
+# 微信系统账号（非真实联系人，查询时应过滤掉）
+_SYSTEM_ACCOUNTS = frozenset({
+    'notifymessage', 'fmessage', 'medianote', 'floatbottle',
+    'qqmail', 'newsapp', 'linkedinplugin',
+})
+
 
 def _decompress(content: bytes) -> str:
     """解压消息内容（ZSTD 压缩）"""
@@ -79,7 +85,8 @@ class WeChatReader:
     def get_contacts(self, keyword: str = "", limit: int = 50) -> List[Dict]:
         """获取联系人列表"""
         conn = self._get_db('contact/contact.db')
-        sql = """
+        placeholders = ','.join('?' * len(_SYSTEM_ACCOUNTS))
+        sql = f"""
             SELECT username, nick_name, remark, alias,
                    CASE
                        WHEN remark IS NOT NULL AND remark != '' THEN remark
@@ -87,15 +94,15 @@ class WeChatReader:
                        ELSE username
                    END as display_name
             FROM contact
-            WHERE username IS NOT NULL AND username NOT LIKE 'gh_%' AND username NOT IN (
-                'notifymessage', 'fmessage', 'medianote', 'floatbottle'
-            )
+            WHERE username IS NOT NULL
+              AND username NOT LIKE 'gh_%%'
+              AND username NOT IN ({placeholders})
         """
-        params: list = []
+        params: list = list(_SYSTEM_ACCOUNTS)
         if keyword:
             sql += " AND (nick_name LIKE ? OR remark LIKE ? OR alias LIKE ?)"
             like = f"%{keyword}%"
-            params = [like, like, like]
+            params.extend([like, like, like])
         sql += " ORDER BY display_name LIMIT ?"
         params.append(limit)
 
@@ -121,10 +128,11 @@ class WeChatReader:
                 d = dict(r)
                 if d.get('last_timestamp'):
                     ts = d['last_timestamp']
-                    if ts > 1e15:
-                        ts = ts / 1000000
-                    elif ts > 1e12:
-                        ts = ts / 1000
+                    # 微信时间戳可能是微秒(>1e15)、毫秒(>1e12)或秒，统一转为秒
+                    if ts > 1e15:          # 微秒级（16位数字）
+                        ts = ts / 1_000_000
+                    elif ts > 1e12:        # 毫秒级（13位数字）
+                        ts = ts / 1_000
                     d['time'] = datetime.fromtimestamp(ts).isoformat()
                 result.append(d)
             return result
@@ -184,10 +192,11 @@ class WeChatReader:
                     d['type'] = d.get('local_type', 0)
                     if d.get('create_time'):
                         ts = d['create_time']
-                        if ts > 1e15:
-                            ts = ts / 1000000
-                        elif ts > 1e12:
-                            ts = ts / 1000
+                        # 微信时间戳可能是微秒(>1e15)、毫秒(>1e12)或秒，统一转为秒
+                        if ts > 1e15:          # 微秒级（16位数字）
+                            ts = ts / 1_000_000
+                        elif ts > 1e12:        # 毫秒级（13位数字）
+                            ts = ts / 1_000
                         d['time'] = datetime.fromtimestamp(ts).isoformat()
                     all_msgs.append(d)
 

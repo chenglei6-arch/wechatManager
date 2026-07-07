@@ -27,7 +27,7 @@ WeChat 4.x stores its data in **SQLCipher 4** encrypted SQLite databases. wx-mcp
 1. **Key Extraction** — Reads the database encryption keys from Weixin.exe process memory via `pymem`
 2. **Database Decryption** — Decrypts the SQLCipher 4 databases (AES-256-CBC, HMAC-SHA512 verification) to standard SQLite
 3. **Data Reading** — Queries the decrypted databases for contacts, sessions, and message content (with ZSTD decompression)
-4. **Message Sending** — Uses Windows window automation (`SendMessage`/`keybd_event`) to interact with the WeChat UI
+4. **Message Sending** — Uses Windows UI Automation (`uiautomation`) to interact with the WeChat UI — no clipboard hijacking, no hardcoded coordinates
 
 No network API, no reverse-engineered protocol — purely local data decryption and UI automation.
 
@@ -45,8 +45,8 @@ No network API, no reverse-engineered protocol — purely local data decryption 
 git clone https://github.com/chenglei6-arch/wechatManager.git
 cd wechatManager/wx-mcp
 
-# Install dependencies
-pip install mcp pycryptodome pymem psutil pyperclip zstandard
+# Install the package and all dependencies in one shot
+pip install -e .
 ```
 
 ## Usage
@@ -117,7 +117,7 @@ claude mcp add wechat -- python -m wx_mcp
 ```
 wx-mcp/
 ├── pyproject.toml          # Python project metadata
-├── requirements.txt        # Python dependencies
+├── pyproject.toml          # Python dependencies (project metadata)
 ├── README.md               # This file
 ├── .gitignore              # Ignore rules (keys, decrypted data, etc.)
 │
