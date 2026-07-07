@@ -31,3 +31,4 @@ venv/
 # OS
 Thumbs.db
 .DS_Store
+@AutomationLog.txt
