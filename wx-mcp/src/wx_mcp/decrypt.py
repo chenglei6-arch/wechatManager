@@ -3,7 +3,10 @@ WeChat 4.x SQLCipher 4 数据库解密
 
 使用从微信进程内存提取的密钥解密 SQLCipher 4 加密的数据库。
 """
-import os, struct, hashlib, hmac as hmac_mod
+import hashlib
+import hmac as hmac_mod
+import os
+import struct
 from Crypto.Cipher import AES
 
 PAGE_SIZE = 4096

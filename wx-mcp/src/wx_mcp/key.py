@@ -80,7 +80,7 @@ def save_keys(keys: Dict[str, str], filepath: str):
 
     加密格式: DPAPI\x00 + DPAPI_encrypted(json_blob)
     """
-    os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
+    os.makedirs(os.path.dirname(filepath) or '.', exist_ok=True)
     plaintext = json.dumps(keys, indent=2).encode('utf-8')
     encrypted = crypto.encrypt(plaintext)
     with open(filepath, 'wb') as f:

@@ -28,7 +28,7 @@ from typing import Dict, Optional
 import atexit
 
 from wx_mcp.key import extract_keys, find_wechat_pid, save_keys, load_keys
-from wx_mcp.decrypt import decrypt_database, get_db_salt, PAGE_SIZE
+from wx_mcp.decrypt import decrypt_database, get_db_salt
 from wx_mcp.reader import WeChatReader
 from wx_mcp.sender import send_message, send_batch
 
@@ -134,21 +134,25 @@ def find_db_storage() -> Optional[str]:
 
 
 def _ensure_keys() -> dict:
-    """获取密钥（带缓存）"""
+    """获取密钥（带缓存，线程安全）"""
     if _state.keys is not None:
         return _state.keys
-    if not os.path.exists(KEYS_FILE):
-        log.info("正在从微信进程提取密钥...")
-        pid = find_wechat_pid()
-        if not pid:
-            raise RuntimeError("微信未运行，请先启动微信")
-        _state.keys = extract_keys(pid)
-        save_keys(_state.keys, KEYS_FILE)
-        log.info("已提取 %d 个密钥", len(_state.keys))
-    else:
-        _state.keys = load_keys(KEYS_FILE)
-        log.info("已加载 %d 个密钥", len(_state.keys))
-    return _state.keys
+    with _state.decrypt_lock:
+        # 双检锁：另一个线程可能已经在我们等待锁时加载了密钥
+        if _state.keys is not None:
+            return _state.keys
+        if not os.path.exists(KEYS_FILE):
+            log.info("正在从微信进程提取密钥...")
+            pid = find_wechat_pid()
+            if not pid:
+                raise RuntimeError("微信未运行，请先启动微信")
+            _state.keys = extract_keys(pid)
+            save_keys(_state.keys, KEYS_FILE)
+            log.info("已提取 %d 个密钥", len(_state.keys))
+        else:
+            _state.keys = load_keys(KEYS_FILE)
+            log.info("已加载 %d 个密钥", len(_state.keys))
+        return _state.keys
 
 
 def get_key_for_db(db_path: str) -> Optional[bytes]:
@@ -169,7 +173,7 @@ def ensure_decrypted():
             if _state.db_storage_dir is None:
                 raise RuntimeError("找不到微信数据目录，请先登录微信")
 
-        keys = _ensure_keys()
+        _ensure_keys()
 
         os.makedirs(_state.decrypted_dir, exist_ok=True)
 

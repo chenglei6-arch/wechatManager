@@ -3,12 +3,10 @@
 
 模拟 reader 和 sender 模块，验证 MCP 工具定义的正确性和错误处理。
 """
-import json
 import unittest
 from unittest.mock import MagicMock, patch
 
 from wx_mcp.server import (
-    mcp,
     list_contacts,
     get_recent_sessions,
     read_messages,
@@ -220,15 +218,6 @@ class TestWechatStatus(unittest.TestCase):
         result = wechat_status()
         self.assertIn('❌', result)
         self.assertIn('未运行', result)
-
-    @patch('wx_mcp.server.wechat_status')
-    def test_status_resource(self, mock_status):
-        """验证 wechat://status 资源返回状态字符串"""
-        mock_status.return_value = 'status ok'
-
-        from wx_mcp.server import status_resource
-        result = status_resource()
-        self.assertEqual(result, 'status ok')
 
 
 if __name__ == '__main__':

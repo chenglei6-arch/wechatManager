@@ -4,7 +4,6 @@
 测试时间戳转换、ZSTD 解压、错误处理等公共工具函数。
 """
 import unittest
-from datetime import datetime
 
 from wx_mcp.utils import normalize_timestamp, timestamp_to_iso, decompress
 

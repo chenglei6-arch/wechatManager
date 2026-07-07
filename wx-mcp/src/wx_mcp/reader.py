@@ -66,6 +66,11 @@ class WeChatReader:
                 log.warning(f"关闭数据库 {rel_path} 失败: {e}")
         self._connections.clear()
 
+    @staticmethod
+    def _escape_like(pattern: str) -> str:
+        """转义 LIKE 通配符，防止 % 和 _ 被解释为通配符"""
+        return pattern.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
     def get_contacts(self, keyword: str = "", limit: int = 50) -> List[Dict]:
         """获取联系人列表"""
         conn = self._get_db('contact/contact.db')
@@ -84,8 +89,9 @@ class WeChatReader:
         """
         params: list = list(_SYSTEM_ACCOUNTS)
         if keyword:
-            sql += " AND (nick_name LIKE ? OR remark LIKE ? OR alias LIKE ?)"
-            like = f"%{keyword}%"
+            sql += " AND (nick_name LIKE ? ESCAPE '\\' OR remark LIKE ? ESCAPE '\\' OR alias LIKE ? ESCAPE '\\')"
+            escaped = self._escape_like(keyword)
+            like = f"%{escaped}%"
             params.extend([like, like, like])
         sql += " ORDER BY display_name LIMIT ?"
         params.append(limit)

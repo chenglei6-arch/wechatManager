@@ -18,11 +18,13 @@ class DATA_BLOB(ctypes.Structure):
     ]
 
     def __init__(self, data: bytes = b''):
-        """从 bytes 构造 DATA_BLOB"""
+        """从 bytes 构造 DATA_BLOB（使用内部 buffer 确保指针稳定）"""
         super().__init__()
         if data:
             self.cbData = len(data)
-            self.pbData = ctypes.cast(data, ctypes.POINTER(ctypes.c_byte))
+            # 用 create_string_buffer 管理内存，防止 bytes 被 GC 后野指针
+            self._buffer = ctypes.create_string_buffer(data)
+            self.pbData = ctypes.cast(self._buffer, ctypes.POINTER(ctypes.c_byte))
         else:
             self.cbData = 0
             self.pbData = None

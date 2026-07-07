@@ -239,5 +239,34 @@ class TestWeChatReaderConnection(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestEscapeLike(unittest.TestCase):
+    """LIKE 通配符转义测试"""
+
+    def test_plain_text_unchanged(self):
+        """普通文本不做转义"""
+        result = WeChatReader._escape_like('hello')
+        self.assertEqual(result, 'hello')
+
+    def test_percent_escaped(self):
+        """% 被转义为 \\%"""
+        result = WeChatReader._escape_like('50%')
+        self.assertEqual(result, r'50\%')
+
+    def test_underscore_escaped(self):
+        """_ 被转义为 \\_"""
+        result = WeChatReader._escape_like('a_b')
+        self.assertEqual(result, r'a\_b')
+
+    def test_backslash_escaped(self):
+        """\\ 本身被双写"""
+        result = WeChatReader._escape_like('a\\b')
+        self.assertEqual(result, r'a\\b')
+
+    def test_all_wildcards_together(self):
+        """混合场景"""
+        result = WeChatReader._escape_like(r'100%_test\foo')
+        self.assertEqual(result, r'100\%\_test\\foo')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -25,7 +25,11 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -e .
-          pip install pytest
+          pip install pytest ruff
+
+      - name: Lint with ruff
+        run: |
+          ruff check src/ tests/
 
       - name: Run unit tests
         run: |
@@ -33,7 +37,9 @@ jobs:
 
       - name: Verify module imports
         run: |
-          python -c "import wx_mcp; print('wx_mcp', wx_mcp.__version__)"
-          python -c "import wx_mcp.decrypt; print('decrypt OK')"
-          python -c "import wx_mcp.crypto; print('crypto OK')"
-          python -c "import wx_mcp.reader; print('reader OK')"
+          python -c "
+          import wx_mcp; print('wx_mcp', wx_mcp.__version__)
+          import wx_mcp.decrypt; print('decrypt OK')
+          import wx_mcp.crypto; print('crypto OK')
+          import wx_mcp.reader; print('reader OK')
+          "

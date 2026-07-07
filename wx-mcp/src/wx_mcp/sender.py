@@ -200,7 +200,8 @@ def _invoke_button(btn: auto.Control) -> bool:
     try:
         btn.Click()
         return True
-    except Exception:
+    except Exception as e:
+        log.debug(f"Click 备选也失败: {e}")
         return False
 
 
@@ -211,8 +212,8 @@ def _restore_previous_focus(prev_handle: Optional[int], wechat_handle: int):
             prev_control = auto.ControlFromHandle(prev_handle)
             if prev_control.Exists(maxSearchSeconds=0):
                 prev_control.SetFocus()
-        except Exception:
-            pass  # 原窗口可能已关闭，忽略
+        except Exception as e:
+            log.debug(f"恢复焦点失败: {e}")
 
 
 def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
@@ -304,8 +305,10 @@ def send_batch(tasks: list, message: Optional[str] = None) -> List[Tuple[str, bo
     批量发送消息
 
     Args:
-        tasks: [(联系人, 消息), ...] 或 [联系人, ...]
-        message: 当 tasks 为联系人列表时使用的默认消息
+        tasks: 支持两种格式 —
+              字符串列表: [联系人, ...] 配合 message 参数使用
+              二元组列表: [(联系人, 消息), ...]
+        message: 当 tasks 为字符串列表时使用的默认消息
 
     Returns:
         [(联系人, 是否成功), ...]
@@ -316,12 +319,18 @@ def send_batch(tasks: list, message: Optional[str] = None) -> List[Tuple[str, bo
 
     results: List[Tuple[str, bool]] = []
     total = len(tasks)
+    default_msg = message or f"测试{int(time.time())}"
 
     for i, task in enumerate(tasks):
-        if isinstance(task, (list, tuple)):
-            contact, msg = task
+        if isinstance(task, str):
+            contact, msg = task, default_msg
         else:
-            contact, msg = task, message or f"测试{int(time.time())}"
+            try:
+                contact, msg = task[0], task[1]
+            except (IndexError, TypeError) as e:
+                log.warning(f"跳过格式错误的任务: {task!r}: {e}")
+                results.append((str(task), False))
+                continue
 
         try:
             is_last = (i == total - 1)
