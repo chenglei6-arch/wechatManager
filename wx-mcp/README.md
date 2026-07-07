@@ -110,6 +110,20 @@ MCP 协议层响应数据量极轻，实测各工具的单次响应 Token 数：
 
 以上为 **服务器响应本身** 的 Token 消耗，不含用户输入和 AI 生成回复。详见 [`token-benchmark.html`](../token-benchmark.html)。
 
+## WeChat 4.x 兼容性说明
+
+WeChat 4.x PC 版基于 Qt 框架，UI 控件嵌套深度远高于传统 Win32 应用。本项目的 sender 模块针对 WeChat 4.x 做了以下适配：
+
+| 适配点 | 说明 |
+|--------|------|
+| 控件搜索深度 | `_SEARCH_DEPTH` 设为 20（常规设置通常只需 5-8） |
+| 搜索框定位 | WeChat 4.x 使用 `XSearchField`（内嵌 `XValidatorTextEdit`），通过深搜 `EditControl` 定位 |
+| 结果匹配 | 列表项 `Name` 包含联系人名 + 最近消息预览，用 `SubName`/`contains` 做包含匹配而非精确匹配 |
+| 输入框定位 | 聊天输入框 `ChatInputField` 和搜索框都是 `EditControl`，通过排除 Name="搜索" 来区分 |
+| 发送按钮 | WeChat 4.x 使用 `XOutlineButton`，按 Name="发送" 直接定位 |
+| 不抢焦点 | 优先用 `ValuePattern`/`InvokePattern` 操作，备选 `SendKeys`/`Click` |
+| 不碰剪贴板 | 全程不调用 `SetClipboard`，文本通过 `ValuePattern.SetValue()` 输入 |
+
 ## 项目结构
 
 ```

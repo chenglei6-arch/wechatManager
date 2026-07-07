@@ -56,14 +56,28 @@ def _find_window(retries: int = 2) -> Optional[auto.WindowControl]:
 
 
 def _ensure_window_restored(wechat: auto.WindowControl) -> bool:
-    """如果窗口最小化则恢复窗口"""
+    """如果窗口最小化则恢复窗口（兼容不同 uiautomation 版本）"""
     try:
         pattern = wechat.GetWindowPattern()
         if pattern:
-            state = pattern.CurrentVisualState
+            # 不同 uiautomation 版本属性名不同，逐个尝试
+            try:
+                state = pattern.WindowVisualState
+            except AttributeError:
+                try:
+                    state = pattern.CurrentVisualState
+                except AttributeError:
+                    return True  # 无法获取状态，跳过
+
             if state == auto.VisualState.Minimized:
                 log.info("微信窗口已最小化，尝试恢复")
-                pattern.SetVisualState(auto.VisualState.Normal)
+                try:
+                    pattern.SetVisualState(auto.VisualState.Normal)
+                except AttributeError:
+                    try:
+                        pattern.SetWindowVisualState(auto.VisualState.Normal)
+                    except AttributeError:
+                        pass
                 time.sleep(0.3)
         return True
     except Exception as e:
@@ -180,14 +194,16 @@ def _find_input_area(window: auto.WindowControl) -> Optional[auto.Control]:
     return None
 
 
-def _collect_all_edit_controls(window: auto.WindowControl) -> list:
-    """递归收集窗口内所有 EditControl（跳过搜索框）"""
+def _collect_all_edit_controls(window: auto.WindowControl, max_depth: int = 15) -> list:
+    """递归收集窗口内所有 EditControl（限制深度防栈溢出）"""
     results = []
+    if max_depth <= 0:
+        return results
     try:
         for c in window.GetChildren():
             if c.ControlTypeName == 'EditControl':
                 results.append(c)
-            results.extend(_collect_all_edit_controls(c))
+            results.extend(_collect_all_edit_controls(c, max_depth - 1))
     except Exception:
         pass
     return results
@@ -320,7 +336,10 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
         try:
             pattern = wechat.GetWindowPattern()
             if pattern:
-                pattern.SetVisualState(auto.VisualState.Minimized)
+                try:
+                    pattern.SetVisualState(auto.VisualState.Minimized)
+                except AttributeError:
+                    pattern.SetWindowVisualState(auto.VisualState.Minimized)
         except Exception as e:
             log.debug(f"最小化失败: {e}")
 

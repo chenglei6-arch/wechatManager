@@ -66,21 +66,26 @@ def timestamp_to_iso(ts: Union[int, float]) -> str:
         return str(ts)
 
 
-def decompress(content: bytes) -> str:
+def decompress(content: Union[bytes, str, None]) -> str:
     """
     解压消息内容（ZSTD 压缩）
 
     微信使用 ZSTD 压缩部分消息内容（以 \\x28\\xb5\\x2f\\xfd 开头），
-    未压缩时直接按 UTF-8 解码。
+    未压缩时直接按 UTF-8 解码。SQLite 可能返回 str 而非 bytes，
+    在此统一处理。
 
     Args:
-        content: 原始字节内容
+        content: 原始内容（bytes 或 str）
 
     Returns:
         解码后的文本字符串
     """
     if not content:
         return ""
+
+    # 已经是 str 则直接返回（SQLite 可能返回 str 而非 bytes）
+    if isinstance(content, str):
+        return content
 
     # ZSTD magic number: 0x28B52FFD
     if content[:4] == b'\x28\xb5\x2f\xfd':
