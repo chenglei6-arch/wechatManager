@@ -1,0 +1,39 @@
+[project]
+name = "wx-mcp"
+version = "0.1.0"
+description = "WeChat MCP Server — let Claude read and send WeChat messages"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["wechat", "mcp", "claude", "weixin"]
+
+authors = [
+    { name = "chenglei6-arch" },
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Environment :: Console",
+]
+
+dependencies = [
+    "mcp>=1.0.0",
+    "pycryptodome>=3.20.0",
+    "pymem>=1.13.0",
+    "psutil>=5.9.0",
+    "pyperclip>=1.8.0",
+    "zstandard>=0.22.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/chenglei6-arch/wechatManager"
+Repository = "https://github.com/chenglei6-arch/wechatManager"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

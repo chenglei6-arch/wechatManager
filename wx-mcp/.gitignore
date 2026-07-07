@@ -1,0 +1,27 @@
+# WeChat decryption keys (YOUR PRIVACY - DO NOT COMMIT)
+keys.json
+
+# Decrypted databases (YOUR PRIVACY - contains personal chat data)
+decrypted/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
