@@ -43,6 +43,11 @@ wechatManager/
 └── .claude/                 # Claude 配置
 ```
 
+## 参考项目
+
+- [Akasha-WeChat](https://github.com/alingalingling/Akasha-WeChat) — MCP Server 架构参考
+- 微信聊天记录解密方案参考了社区多个开源项目的实现
+
 ## License
 
 [MIT](LICENSE)

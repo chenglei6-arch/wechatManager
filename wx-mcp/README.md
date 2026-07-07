@@ -128,6 +128,11 @@ cd wx-mcp && pytest -v --tb=short
 pytest --cov=wx_mcp tests/
 ```
 
+## 参考项目
+
+- [Akasha-WeChat](https://github.com/alingalingling/Akasha-WeChat) — MCP Server 架构与实现参考
+- 微信 SQLCipher 数据库解密方案参考了社区多个开源项目的思路与实践
+
 ## 免责声明
 
 本项目仅供学习和研究使用。使用本项目产生的任何后果由使用者自行承担。
