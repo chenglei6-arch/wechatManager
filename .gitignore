@@ -1,0 +1,28 @@
+# Claude project settings
+.claude/
+
+# WeChat decryption keys & decrypted data
+wx-mcp/keys.json
+wx-mcp/decrypted/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
