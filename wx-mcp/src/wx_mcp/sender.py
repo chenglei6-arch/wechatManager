@@ -15,8 +15,8 @@ import uiautomation as auto
 
 log = logging.getLogger('wx-mcp.sender')
 
-# 控件搜索深度（Qt 嵌套层级较深）
-_SEARCH_DEPTH = 8
+# 控件搜索深度（WeChat 4.x 基于 Qt，嵌套层级很深，需 >12）
+_SEARCH_DEPTH = 20
 
 # UI 操作等待超时（秒）
 _WAIT_SHORT = 0.5
@@ -90,11 +90,9 @@ def _search_contact(wechat: auto.WindowControl, chat_name: str) -> bool:
             return False
 
     # 等待搜索结果出现（动态等待取代固定 sleep）
+    # WeChat 4.x 的列表项 Name 包含额外信息（如最近消息预览），因此用 SubName 匹配
     found = _wait_for(
-        lambda: (
-            wechat.ListItemControl(Name=chat_name, searchDepth=_SEARCH_DEPTH).Exists(maxSearchSeconds=0)
-            # 也可以接受搜索结果第一条（名称包含搜索词）
-        ),
+        lambda: _find_contact_in_children(wechat, chat_name),
         timeout=2.0,
     )
     if not found:
@@ -102,10 +100,27 @@ def _search_contact(wechat: auto.WindowControl, chat_name: str) -> bool:
     return True
 
 
+def _find_contact_in_children(wechat: auto.WindowControl, chat_name: str) -> bool:
+    """遍历窗口内所有 ListItemControl，查找名称包含 chat_name 的联系人"""
+    try:
+        for item in wechat.ListControl(searchDepth=_SEARCH_DEPTH).GetChildren():
+            if chat_name in (item.Name or ''):
+                return True
+    except Exception:
+        pass
+    # 备选：直接用 SubName 搜索
+    try:
+        item = wechat.ListItemControl(SubName=chat_name, searchDepth=_SEARCH_DEPTH)
+        return item.Exists(maxSearchSeconds=0)
+    except Exception:
+        return False
+
+
 def _open_chat(wechat: auto.WindowControl, chat_name: str) -> bool:
     """点击搜索结果中的联系人打开聊天窗口"""
     try:
-        target = wechat.ListItemControl(Name=chat_name, searchDepth=_SEARCH_DEPTH)
+        # WeChat 4.x ListItem Name 含额外信息，用 SubName 做包含匹配
+        target = wechat.ListItemControl(SubName=chat_name, searchDepth=_SEARCH_DEPTH)
         if target.Exists(maxSearchSeconds=_WAIT_SHORT):
             target.Click()
             return True
