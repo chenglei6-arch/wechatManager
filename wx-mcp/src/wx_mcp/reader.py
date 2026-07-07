@@ -12,10 +12,9 @@ import hashlib
 import logging
 import os
 import sqlite3
-from datetime import datetime
 from typing import Dict, List, Optional
 
-import zstandard as zstd
+from wx_mcp.utils import decompress, timestamp_to_iso
 
 log = logging.getLogger('wx-mcp.reader')
 
@@ -24,22 +23,6 @@ _SYSTEM_ACCOUNTS = frozenset({
     'notifymessage', 'fmessage', 'medianote', 'floatbottle',
     'qqmail', 'newsapp', 'linkedinplugin',
 })
-
-
-def _decompress(content: bytes) -> str:
-    """解压消息内容（ZSTD 压缩）"""
-    if not content:
-        return ""
-    if content[:4] == b'\x28\xb5\x2f\xfd':
-        try:
-            return zstd.decompress(content).decode('utf-8', errors='replace')
-        except Exception as e:
-            log.warning(f"ZSTD 解压失败 ({len(content)} bytes): {e}")
-    try:
-        return content.decode('utf-8', errors='replace')
-    except Exception as e:
-        log.warning(f"字节解码失败 ({len(content)} bytes): {e}")
-        return str(content)
 
 
 class WeChatReader:
@@ -57,8 +40,9 @@ class WeChatReader:
             try:
                 conn.execute("SELECT 1").fetchone()
                 return conn
-            except sqlite3.ProgrammingError:
-                # 连接已关闭，重新创建
+            except (sqlite3.ProgrammingError, sqlite3.OperationalError,
+                    sqlite3.DatabaseError, sqlite3.Error):
+                # 连接已关闭或损坏，重新创建
                 pass
 
         path = os.path.join(self.decrypted_dir, rel_path)
@@ -127,13 +111,7 @@ class WeChatReader:
             for r in rows:
                 d = dict(r)
                 if d.get('last_timestamp'):
-                    ts = d['last_timestamp']
-                    # 微信时间戳可能是微秒(>1e15)、毫秒(>1e12)或秒，统一转为秒
-                    if ts > 1e15:          # 微秒级（16位数字）
-                        ts = ts / 1_000_000
-                    elif ts > 1e12:        # 毫秒级（13位数字）
-                        ts = ts / 1_000
-                    d['time'] = datetime.fromtimestamp(ts).isoformat()
+                    d['time'] = timestamp_to_iso(d['last_timestamp'])
                 result.append(d)
             return result
         except Exception as e:
@@ -188,16 +166,10 @@ class WeChatReader:
                 for r in rows:
                     d = dict(r)
                     content = d.get('message_content') or b''
-                    d['content'] = _decompress(content)
+                    d['content'] = decompress(content)
                     d['type'] = d.get('local_type', 0)
                     if d.get('create_time'):
-                        ts = d['create_time']
-                        # 微信时间戳可能是微秒(>1e15)、毫秒(>1e12)或秒，统一转为秒
-                        if ts > 1e15:          # 微秒级（16位数字）
-                            ts = ts / 1_000_000
-                        elif ts > 1e12:        # 毫秒级（13位数字）
-                            ts = ts / 1_000
-                        d['time'] = datetime.fromtimestamp(ts).isoformat()
+                        d['time'] = timestamp_to_iso(d['create_time'])
                     all_msgs.append(d)
 
             except Exception as e:

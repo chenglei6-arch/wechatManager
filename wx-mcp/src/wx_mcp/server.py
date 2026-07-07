@@ -5,7 +5,7 @@ WeChat MCP Server
 
 安装:
   pip install -e wx-mcp/
-  # 然后通过 MCP 配置:
+  然后通过 MCP 配置:
   python -m wx_mcp
 
 或通过 MCP 配置 (claude.json):
@@ -20,14 +20,15 @@ WeChat MCP Server
 import json
 import logging
 import os
+import tempfile
 import threading
-import time
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 
 import atexit
 
 from wx_mcp.key import extract_keys, find_wechat_pid, save_keys, load_keys
-from wx_mcp.decrypt import decrypt_database, get_db_salt, verify_page1, PAGE_SIZE
+from wx_mcp.decrypt import decrypt_database, get_db_salt, PAGE_SIZE
 from wx_mcp.reader import WeChatReader
 from wx_mcp.sender import send_message, send_batch
 
@@ -40,9 +41,7 @@ log = logging.getLogger('wx-mcp')
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)  # wx-mcp/
 KEYS_FILE = os.path.join(PROJECT_DIR, 'keys.json')
-DECRYPTED_DIR = os.path.join(PROJECT_DIR, 'decrypted')
 WECHAT_DATA_DIR = os.path.expanduser('~/Documents/xwechat_files')
-DB_STORAGE_DIR = None  # 自动检测
 
 # 需要解密的数据库文件（相对于 DB_STORAGE_DIR）
 _REQUIRED_DBS = [
@@ -62,24 +61,54 @@ _MSG_TYPE_LABELS = {
     10000: '系统',
 }
 
-# ---- 模块级缓存 + 锁 ----
-_reader_instance = None
-_reader_decrypted_dir = None
-_keys_cache = None
-_db_storage_cache = None
-_decrypt_lock = threading.Lock()
-_reader_lock = threading.Lock()
+
+@dataclass
+class ServerState:
+    """MCP Server 运行时状态（替代零散全局变量）"""
+
+    # 解密后的数据库存放目录（系统临时目录，退出自动清理）
+    decrypted_dir: str = field(default_factory=lambda: tempfile.mkdtemp(prefix='wx_mcp_'))
+
+    # 微信原生数据库目录
+    db_storage_dir: Optional[str] = None
+
+    # 缓存的密钥 {salt_hex: key_hex}
+    keys: Optional[Dict[str, str]] = None
+
+    # 缓存的 WeChatReader 实例
+    reader: Optional[WeChatReader] = None
+
+    # 记录 reader 对应的解密目录，变更时重建
+    reader_decrypted_dir: str = ''
+
+    # 并发锁
+    decrypt_lock: threading.Lock = field(default_factory=threading.Lock)
+    reader_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+# 唯一状态实例，替代 7 个全局变量
+_state = ServerState()
 
 
 def _cleanup():
-    """退出时关闭数据库连接"""
-    global _reader_instance
-    if _reader_instance is not None:
+    """退出时清理临时文件和数据库连接"""
+    # 关闭 reader 连接
+    if _state.reader is not None:
         try:
-            _reader_instance.close()
+            _state.reader.close()
         except Exception as e:
-            log.warning(f"reader 清理失败: {e}")
-        _reader_instance = None
+            log.warning("reader 清理失败: %s", e)
+        _state.reader = None
+
+    # 清理临时目录
+    decrypted = _state.decrypted_dir
+    if decrypted and os.path.exists(decrypted):
+        try:
+            import shutil
+            shutil.rmtree(decrypted, ignore_errors=True)
+            log.info("临时解密目录已清理: %s", decrypted)
+        except Exception as e:
+            log.warning("临时目录清理失败: %s", e)
 
 
 atexit.register(_cleanup)
@@ -106,25 +135,25 @@ def find_db_storage() -> Optional[str]:
 
 def _ensure_keys() -> dict:
     """获取密钥（带缓存）"""
-    global _keys_cache
-    if _keys_cache is not None:
-        return _keys_cache
+    if _state.keys is not None:
+        return _state.keys
     if not os.path.exists(KEYS_FILE):
         log.info("正在从微信进程提取密钥...")
         pid = find_wechat_pid()
         if not pid:
             raise RuntimeError("微信未运行，请先启动微信")
-        _keys_cache = extract_keys(pid)
-        save_keys(_keys_cache, KEYS_FILE)
-        log.info(f"已提取 {len(_keys_cache)} 个密钥")
+        _state.keys = extract_keys(pid)
+        save_keys(_state.keys, KEYS_FILE)
+        log.info("已提取 %d 个密钥", len(_state.keys))
     else:
-        _keys_cache = load_keys(KEYS_FILE)
-        log.info(f"已加载 {len(_keys_cache)} 个密钥")
-    return _keys_cache
+        _state.keys = load_keys(KEYS_FILE)
+        log.info("已加载 %d 个密钥", len(_state.keys))
+    return _state.keys
 
 
-def get_key_for_db(keys: dict, db_path: str) -> Optional[bytes]:
+def get_key_for_db(db_path: str) -> Optional[bytes]:
     """获取特定数据库的密钥"""
+    keys = _ensure_keys()
     salt = get_db_salt(db_path)
     salt_hex = salt.hex()
     if salt_hex in keys:
@@ -134,49 +163,49 @@ def get_key_for_db(keys: dict, db_path: str) -> Optional[bytes]:
 
 def ensure_decrypted():
     """确保所有数据库已解密（线程安全，幂等）"""
-    with _decrypt_lock:
-        global DB_STORAGE_DIR, _db_storage_cache
-        if DB_STORAGE_DIR is None:
-            DB_STORAGE_DIR = find_db_storage()
-            if DB_STORAGE_DIR is None:
+    with _state.decrypt_lock:
+        if _state.db_storage_dir is None:
+            _state.db_storage_dir = find_db_storage()
+            if _state.db_storage_dir is None:
                 raise RuntimeError("找不到微信数据目录，请先登录微信")
 
         keys = _ensure_keys()
 
-        os.makedirs(DECRYPTED_DIR, exist_ok=True)
+        os.makedirs(_state.decrypted_dir, exist_ok=True)
 
         for rel in _REQUIRED_DBS:
-            src = os.path.join(DB_STORAGE_DIR, rel)
-            dst = os.path.join(DECRYPTED_DIR, rel)
+            src = os.path.join(_state.db_storage_dir, rel)
+            dst = os.path.join(_state.decrypted_dir, rel)
             if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
                 continue
-            key = get_key_for_db(keys, src)
+            log.info("解密: %s ...", rel)
+            key = get_key_for_db(src)
             if not key:
-                log.warning(f"无密钥: {rel}")
+                log.warning("无密钥: %s", rel)
                 continue
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             ok = decrypt_database(src, dst, key)
             if ok:
-                log.info(f"已解密: {rel}")
+                log.info("已解密: %s", rel)
             else:
-                log.warning(f"解密失败: {rel}")
+                log.warning("解密失败: %s", rel)
 
-        log.info(f"解密完成，数据在 {DECRYPTED_DIR}")
+        log.info("解密完成，数据在 %s", _state.decrypted_dir)
 
 
 def get_reader() -> WeChatReader:
     """获取（缓存的）WeChatReader 实例（线程安全）"""
-    global _reader_instance, _reader_decrypted_dir
-    if _reader_instance is not None and _reader_decrypted_dir == DECRYPTED_DIR:
-        return _reader_instance
-    with _reader_lock:
-        # 双重检查
-        if _reader_instance is not None and _reader_decrypted_dir == DECRYPTED_DIR:
-            return _reader_instance
+    if _state.reader is not None and _state.reader_decrypted_dir == _state.decrypted_dir:
+        return _state.reader
+    with _state.reader_lock:
+        if _state.reader is not None and _state.reader_decrypted_dir == _state.decrypted_dir:
+            return _state.reader
         ensure_decrypted()
-        _reader_instance = WeChatReader(DECRYPTED_DIR)
-        _reader_decrypted_dir = DECRYPTED_DIR
-        return _reader_instance
+        if _state.reader is not None:
+            _state.reader.close()
+        _state.reader = WeChatReader(_state.decrypted_dir)
+        _state.reader_decrypted_dir = _state.decrypted_dir
+        return _state.reader
 
 
 # ---- 初始化 MCP Server ----
@@ -227,7 +256,7 @@ def list_contacts(keyword: str = "", limit: int = 50) -> str:
             lines.append(f"    wxid: {username}")
         return "\n".join(lines)
     except Exception as e:
-        log.error(f"list_contacts 失败: {e}", exc_info=True)
+        log.error("list_contacts 失败: %s", e, exc_info=True)
         return f"❌ 获取联系人失败: {e}"
 
 
@@ -253,7 +282,7 @@ def get_recent_sessions(limit: int = 20) -> str:
                 lines.append(f"    {str(content)[:60]}")
         return "\n".join(lines)
     except Exception as e:
-        log.error(f"get_recent_sessions 失败: {e}", exc_info=True)
+        log.error("get_recent_sessions 失败: %s", e, exc_info=True)
         return f"❌ 获取会话失败: {e}"
 
 
@@ -284,8 +313,7 @@ def read_messages(talker: str, limit: int = 30) -> str:
             content = str(m.get('content', '')) or ''
             msg_time = m.get('time', '')
 
-            type_map = _MSG_TYPE_LABELS
-            t = type_map.get(msg_type, f'type{msg_type}')
+            t = _MSG_TYPE_LABELS.get(msg_type, f'type{msg_type}')
 
             if msg_type == 1:
                 lines.append(f"  [{msg_time}] {content[:200]}")
@@ -293,7 +321,7 @@ def read_messages(talker: str, limit: int = 30) -> str:
                 lines.append(f"  [{msg_time}] [{t}] {content[:100]}")
         return "\n".join(lines)
     except Exception as e:
-        log.error(f"read_messages 失败: {e}", exc_info=True)
+        log.error("read_messages 失败: %s", e, exc_info=True)
         return f"❌ 读取消息失败: {e}"
 
 
@@ -313,7 +341,7 @@ def send_wechat_message(contact: str, message: str) -> str:
         else:
             return f"❌ 发送失败: 未找到微信窗口或联系人 {contact}"
     except Exception as e:
-        log.error(f"send_wechat_message 失败: {e}", exc_info=True)
+        log.error("send_wechat_message 失败: %s", e, exc_info=True)
         return f"❌ 发送失败: {e}"
 
 
@@ -334,7 +362,7 @@ def batch_send_messages(contacts: list, message: str) -> str:
             lines.append(f"  {'✅' if ok else '❌'} {contact}")
         return "\n".join(lines)
     except Exception as e:
-        log.error(f"batch_send_messages 失败: {e}", exc_info=True)
+        log.error("batch_send_messages 失败: %s", e, exc_info=True)
         return f"❌ 批量发送失败: {e}"
 
 
@@ -345,20 +373,20 @@ def wechat_status() -> str:
         pid = find_wechat_pid()
         db_dir = find_db_storage()
         keys_loaded = os.path.exists(KEYS_FILE)
-        decrypted = os.path.exists(DECRYPTED_DIR)
+        decrypted = os.path.exists(_state.decrypted_dir)
 
         status = []
         status.append(f"微信进程: {'✅ 运行中' if pid else '❌ 未运行'}")
         status.append(f"数据目录: {'✅ ' + (db_dir or '') if db_dir else '❌ 未找到'}")
         status.append(f"密钥文件: {'✅ ' + KEYS_FILE if keys_loaded else '❌ 未提取'}")
-        status.append(f"解密数据: {'✅ ' + DECRYPTED_DIR if decrypted else '❌ 未解密'}")
+        status.append(f"解密数据: {'✅ ' + _state.decrypted_dir if decrypted else '❌ 未解密'}")
 
         if keys_loaded:
             keys = load_keys(KEYS_FILE)
             status.append(f"密钥数量: {len(keys)}")
         return "\n".join(status)
     except Exception as e:
-        log.error(f"wechat_status 失败: {e}", exc_info=True)
+        log.error("wechat_status 失败: %s", e, exc_info=True)
         return f"❌ 状态检查失败: {e}"
 
 
@@ -372,10 +400,11 @@ def status_resource() -> str:
 def main():
     """启动 MCP Server"""
     log.info("WeChat MCP Server 启动中...")
+    log.info("解密临时目录: %s", _state.decrypted_dir)
     try:
         ensure_decrypted()
     except Exception as e:
-        log.warning(f"初始化失败: {e}")
+        log.warning("初始化失败: %s", e)
         log.warning("启动后可使用 wechat_status 检查状态")
 
     log.info("WeChat MCP Server 已就绪")

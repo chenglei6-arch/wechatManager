@@ -11,6 +11,12 @@ __pycache__/
 dist/
 build/
 
+# Testing
+.coverage
+coverage/
+htmlcov/
+.pytest_cache/
+
 # Environment
 .env
 venv/

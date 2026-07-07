@@ -1,76 +1,41 @@
 # wx-mcp: WeChat MCP Server
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
+让 Claude 通过 **MCP (Model Context Protocol)** 读取和发送微信消息。
 
-A Model Context Protocol (MCP) server that gives Claude the ability to read and send WeChat messages. Works with **WeChat 4.x** on Windows.
+> ⚠️ **安全警告**
+> 本工具通过扫描微信进程内存提取解密密钥，**可能触发微信的安全检测导致封号**。
+> 解密后的数据库存储在系统临时目录，退出时自动清理。使用风险自负。
 
-> ⚠️ **Windows only** — relies on WeChat 4.x (Weixin.exe) and Windows window automation for sending messages.
+## 功能
 
----
+| 功能 | 方式 | 说明 |
+|------|------|------|
+| 📋 列出联系人 | SQLite 读取 | 支持关键词搜索，过滤系统账号和公众号 |
+| 💬 读取聊天记录 | SQLite 读取 | 自动处理 ZSTD 解压和时间戳转换 |
+| 🕐 最近会话 | SQLite 读取 | 按时间排序的会话列表 |
+| ✉️ 发送消息 | UI Automation | 通过 UIA 与微信窗口交互，不操作剪贴板 |
+| 📨 批量发送 | UI Automation | 支持多联系人群发 |
+| 📊 状态检查 | 综合检测 | 查看微信运行状态和解密情况 |
 
-## Features
-
-| Capability | Description |
-|-----------|-------------|
-| ✅ **Read contacts** | List and search WeChat contacts by name or remark |
-| ✅ **Read messages** | Retrieve chat history with any contact |
-| ✅ **View sessions** | List recent chat sessions |
-| ✅ **Send messages** | Send text messages to any contact |
-| ✅ **Batch send** | Send the same message to multiple contacts at once |
-| ✅ **Auto key extraction** | Automatically extracts decryption keys from WeChat process |
-
-## How It Works
-
-WeChat 4.x stores its data in **SQLCipher 4** encrypted SQLite databases. wx-mcp works entirely offline by:
-
-1. **Key Extraction** — Reads the database encryption keys from Weixin.exe process memory via `pymem`
-2. **Database Decryption** — Decrypts the SQLCipher 4 databases (AES-256-CBC, HMAC-SHA512 verification) to standard SQLite
-3. **Data Reading** — Queries the decrypted databases for contacts, sessions, and message content (with ZSTD decompression)
-4. **Message Sending** — Uses Windows UI Automation (`uiautomation`) to interact with the WeChat UI — no clipboard hijacking, no hardcoded coordinates
-
-No network API, no reverse-engineered protocol — purely local data decryption and UI automation.
-
-## Prerequisites
-
-- **Windows OS** (10 or 11)
-- **WeChat 4.x** (Weixin.exe) installed and logged in
-- **Python 3.10+**
-- Administrator privileges (for reading WeChat process memory)
-
-## Installation
+## 安装
 
 ```bash
-# Clone the repository
-git clone https://github.com/chenglei6-arch/wechatManager.git
+# 克隆项目
+git clone https://github.com/chenglei6-arch/wechatManager
 cd wechatManager/wx-mcp
 
-# Install the package and all dependencies in one shot
+# 安装
 pip install -e .
 ```
 
-## Usage
+**环境要求：**
+- Windows 10/11
+- 微信 4.x PC 版已登录
+- Python ≥ 3.10
 
-### Install (development mode)
+## 配置 MCP
 
-```bash
-cd wx-mcp/
-pip install -e .
-```
-
-### Run as standalone server
-
-```bash
-# After pip install -e .
-python -m wx_mcp
-
-# Or via installed entry point
-wx-mcp
-```
-
-### Configure with Claude Desktop
-
-Add to your `claude.json` (Claude Desktop settings):
+在 Claude 的 MCP 配置文件（`claude.json`）中添加：
 
 ```json
 {
@@ -78,90 +43,91 @@ Add to your `claude.json` (Claude Desktop settings):
     "wechat": {
       "command": "python",
       "args": ["-m", "wx_mcp"],
-      "env": {
-        "PYTHONIOENCODING": "utf-8"
-      }
+      "env": { "PYTHONIOENCODING": "utf-8" }
     }
   }
 }
 ```
 
-### Configure with Claude Code
+或通过 Claude Code 添加：
 
 ```bash
 claude mcp add wechat -- python -m wx_mcp
 ```
 
-## MCP Tools
+## 使用
 
-| Tool | Arguments | Description |
-|------|-----------|-------------|
-| `list_contacts` | `keyword?` `limit=50` | Search and list contacts |
-| `read_messages` | `talker` `limit=30` | Read chat history (supports name or wxid) |
-| `get_recent_sessions` | `limit=20` | List recent conversations |
-| `send_wechat_message` | `contact` `message` | Send a text message |
-| `batch_send_messages` | `contacts[]` `message` | Send message to multiple contacts |
-| `wechat_status` | — | Check WeChat connection status |
+```bash
+python -m wx_mcp
+```
 
-## MCP Resources
+### MCP 工具
 
-| Resource | Description |
-|----------|-------------|
-| `wechat://contacts` | Full contact list |
-| `wechat://contacts/search/{keyword}` | Search results |
-| `wechat://messages/{talker}` | Recent messages with a contact |
-| `wechat://status` | Server status |
+| 工具 | 参数 | 说明 |
+|------|------|------|
+| `list_contacts` | `keyword?`, `limit=50` | 搜索/列出联系人 |
+| `read_messages` | `talker`, `limit=30` | 读取聊天记录（支持 wxid 或昵称） |
+| `get_recent_sessions` | `limit=20` | 最近会话列表 |
+| `send_wechat_message` | `contact`, `message` | 发送文本消息 |
+| `batch_send_messages` | `contacts[]`, `message` | 批量发送 |
+| `wechat_status` | — | 查看运行状态 |
 
-## Project Structure
+### MCP 资源
+
+| URI | 说明 |
+|-----|------|
+| `wechat://contacts` | 联系人列表 (JSON) |
+| `wechat://contacts/search/{keyword}` | 搜索联系人 (JSON) |
+| `wechat://messages/{talker}` | 聊天记录 (JSON) |
+| `wechat://status` | 运行状态 |
+
+## 项目结构
 
 ```
 wx-mcp/
-├── pyproject.toml          # Python project metadata
-├── pyproject.toml          # Python dependencies (project metadata)
-├── README.md               # This file
-├── .gitignore              # Ignore rules (keys, decrypted data, etc.)
-│
-├── keys.json               # ⚠️ Auto-generated decryption keys (local only)
-├── decrypted/              # ⚠️ Auto-generated decrypted databases (local only)
-│
-└── src/wx_mcp/
-    ├── __init__.py          # Package init
-    ├── __main__.py          # CLI entry: python -m wx_mcp
-    ├── server.py            # FastMCP server — tools & resources
-    ├── key.py               # Key extraction from WeChat process memory
-    ├── decrypt.py           # SQLCipher 4 decryption engine
-    ├── reader.py            # Contacts, sessions, message reader
-    └── sender.py            # Window automation message sender
+├── src/wx_mcp/
+│   ├── __init__.py       # 包信息
+│   ├── __main__.py       # 入口: python -m wx_mcp
+│   ├── server.py         # FastMCP Server — 工具 & 资源定义
+│   ├── key.py            # 微信进程内存密钥提取
+│   ├── decrypt.py        # SQLCipher 4 解密引擎
+│   ├── crypto.py         # Windows DPAPI 加密
+│   ├── reader.py         # 解密数据库读取（联系人/消息/会话）
+│   ├── sender.py         # UI Automation 消息发送
+│   └── utils.py          # 工具函数（时间戳转换/ZSTD 解压）
+├── tests/                # 单元测试（94 个）
+├── .github/workflows/    # CI
+└── pyproject.toml         # 项目配置
 ```
 
-### Module Overview
+## 技术原理
 
-| Module | Role |
-|--------|------|
-| `server.py` | FastMCP server, defines all tools and resources |
-| `key.py` | Scans Weixin.exe memory for SQLCipher key patterns |
-| `decrypt.py` | Decrypts SQLCipher 4 pages (AES-256-CBC + HMAC-SHA512) |
-| `reader.py` | Reads from decrypted SQLite databases |
-| `sender.py` | Sends messages via Windows window automation |
+1. **密钥提取**: 使用 `pymem` 扫描 Weixin.exe 进程内存，搜索 SQLCipher 密钥模式
+2. **数据库解密**: 实现 SQLCipher 4 的 AES-256-CBC 解密 + HMAC-SHA512 完整性验证
+3. **数据读取**: 直接读取解密后的 SQLite 数据库，ZSTD 解压消息内容
+4. **消息发送**: 使用 Windows UI Automation (uiautomation) 与微信 Qt 界面交互
+5. **密钥存储**: Windows DPAPI (`CryptProtectData`) 加密，仅当前用户可解密
 
-## Security & Privacy
+## 安全设计
 
-**Your privacy is the top priority.** By design:
+- 🔑 密钥文件 `keys.json` 使用 **Windows DPAPI** 加密存储
+- 🗑️ 解密后的数据库存储在**系统临时目录**，进程退出时自动清理
+- 🔒 `.gitignore` 已配置屏蔽所有敏感文件
+- 📡 纯本地运行，**无网络请求**
 
-- ✅ **Everything runs locally** — no data leaves your machine
-- ✅ **Keys stay on disk** — extracted keys are cached in `keys.json` (gitignored)
-- ✅ **Decrypted DBs stay local** — cached in `decrypted/` (gitignored)
-- ✅ **No network calls** — all decryption and reading is offline
-- ✅ **No uploads** — the server communicates with Claude via local stdio
+## 开发
 
-The `.gitignore` ensures `keys.json` and `decrypted/` are never committed to git.
+```bash
+# 安装开发依赖
+pip install -e ".[dev]"
 
-## Why This Approach?
+# 运行测试
+cd wx-mcp && pytest -v --tb=short
 
-WeChat 4.x stores data in **WCDB** (WeChat Core DataBase), which uses SQLCipher 4 for encryption. Unlike the mobile versions, the Windows desktop client keeps the encryption keys in its process memory — making local decryption possible.
+# 带覆盖率
+pytest --cov=wx_mcp tests/
+```
 
-For sending, WeChat 4.x's UI is built with Qt, not Chromium, which means standard Windows window messages work reliably for automation.
+## 免责声明
 
-## License
-
-MIT
+本项目仅供学习和研究使用。使用本项目产生的任何后果由使用者自行承担。

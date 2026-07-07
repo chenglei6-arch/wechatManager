@@ -9,8 +9,15 @@ wx-mcp/decrypted/
 __pycache__/
 *.py[cod]
 *.egg-info/
+**/*.egg-info/
 dist/
 build/
+
+# Testing
+.coverage
+coverage/
+htmlcov/
+.pytest_cache/
 
 # Environment
 .env
