@@ -161,21 +161,36 @@ def _find_send_button(window: auto.WindowControl) -> Optional[auto.Control]:
 
 
 def _find_input_area(window: auto.WindowControl) -> Optional[auto.Control]:
-    """找消息输入框 — 尝试多种控件类型"""
-    # 策略1: EditControl
-    edit = window.EditControl(searchDepth=_SEARCH_DEPTH)
-    if edit.Exists(maxSearchSeconds=_WAIT_SHORT):
-        return edit
-    # 策略2: DocumentControl (Qt QTextEdit/QTextDocument)
+    """找消息输入框 — 排除搜索框，定位聊天输入区域"""
+    # 搜索所有 EditControl，排除搜索框（WeChat 4.x 搜索框 Name="搜索"）
+    try:
+        for ctrl in _collect_all_edit_controls(window):
+            name = ctrl.Name or ''
+            # 搜索框的 Name 为"搜索"，聊天输入框的 Name 为联系人名称
+            if name != '搜索':
+                return ctrl
+    except Exception:
+        pass
+
+    # 备选：DocumentControl (Qt QTextEdit/QTextDocument)
     doc = window.DocumentControl(searchDepth=_SEARCH_DEPTH)
     if doc.Exists(maxSearchSeconds=_WAIT_SHORT):
         return doc
-    # 策略3: 直接找最后一个可编辑的控件
-    all_children = window.GetChildren()
-    for c in all_children:
-        if c.ControlType in (auto.ControlType.EditControl, auto.ControlType.DocumentControl):
-            return c
+
     return None
+
+
+def _collect_all_edit_controls(window: auto.WindowControl) -> list:
+    """递归收集窗口内所有 EditControl（跳过搜索框）"""
+    results = []
+    try:
+        for c in window.GetChildren():
+            if c.ControlTypeName == 'EditControl':
+                results.append(c)
+            results.extend(_collect_all_edit_controls(c))
+    except Exception:
+        pass
+    return results
 
 
 def _set_text_via_value_pattern(control: auto.Control, text: str) -> bool:
