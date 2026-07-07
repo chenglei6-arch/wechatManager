@@ -1,112 +1,102 @@
 """
 微信消息发送器
 
-使用窗口自动化（非 API）发送消息到指定的联系人或群聊。
-通过 SendInput 模拟键盘鼠标输入，取代已弃用的 keybd_event/mouse_event。
+使用 UI Automation (uiautomation) 与微信窗口交互，发送消息。
+相比旧版（SendInput + 硬编码坐标）：
+  ✅ 不抢焦点 — 优先通过 UIA 模式接口操作，不强制激活窗口
+  ✅ 不劫持剪贴板 — 用 SetValuePattern / SendKeys 直接输入文本
+  ✅ 无硬编码坐标 — 通过控件树定位元素
 """
-import sys, os, time, ctypes, logging
-from ctypes import wintypes
+import logging
+import time
+from typing import List, Optional, Tuple
+
+import uiautomation as auto
 
 log = logging.getLogger('wx-mcp.sender')
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-
-# ---- SendInput 类型定义 ----
-INPUT_MOUSE = 0
-INPUT_KEYBOARD = 1
-
-KEYEVENTF_KEYDOWN = 0x0000
-KEYEVENTF_KEYUP = 0x0002
-
-MOUSEEVENTF_LEFTDOWN = 0x0002
-MOUSEEVENTF_LEFTUP = 0x0004
-
-# dwExtraInfo 是指针大小（64位=8字节, 32位=4字节）
-ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+# 控件搜索深度（Qt 嵌套层级较深）
+_SEARCH_DEPTH = 8
 
 
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ('wVk', wintypes.WORD),
-        ('wScan', wintypes.WORD),
-        ('dwFlags', wintypes.DWORD),
-        ('time', wintypes.DWORD),
-        ('dwExtraInfo', ULONG_PTR),
-    ]
+def _find_send_button(window: auto.WindowControl) -> Optional[auto.Control]:
+    """找发送按钮 — 尝试多种查找策略"""
+    # 策略1: 按名称查找
+    btn = window.ButtonControl(Name='发送', searchDepth=_SEARCH_DEPTH)
+    if btn.Exists(maxSearchSeconds=0.5):
+        return btn
+    # 策略2: 按 AutomationId (部分 Qt 版本)
+    btn = window.Control(AutomationId='SendButton', searchDepth=_SEARCH_DEPTH)
+    if btn.Exists(maxSearchSeconds=0.5):
+        return btn
+    return None
 
 
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [
-        ('dx', wintypes.LONG),
-        ('dy', wintypes.LONG),
-        ('mouseData', wintypes.DWORD),
-        ('dwFlags', wintypes.DWORD),
-        ('time', wintypes.DWORD),
-        ('dwExtraInfo', ULONG_PTR),
-    ]
+def _find_input_area(window: auto.WindowControl) -> Optional[auto.Control]:
+    """找消息输入框 — 尝试多种控件类型"""
+    # 策略1: EditControl
+    edit = window.EditControl(searchDepth=_SEARCH_DEPTH)
+    if edit.Exists(maxSearchSeconds=0.5):
+        return edit
+    # 策略2: DocumentControl (Qt QTextEdit/QTextDocument)
+    doc = window.DocumentControl(searchDepth=_SEARCH_DEPTH)
+    if doc.Exists(maxSearchSeconds=0.5):
+        return doc
+    # 策略3: 直接找最后一个可编辑的控件
+    all_edits = window.GetChildren()
+    for c in all_edits:
+        if c.ControlType in (auto.ControlType.EditControl, auto.ControlType.DocumentControl):
+            return c
+    return None
 
 
-class INPUT_UNION(ctypes.Union):
-    _fields_ = [
-        ('mi', MOUSEINPUT),
-        ('ki', KEYBDINPUT),
-    ]
+def _set_text_via_value_pattern(control: auto.Control, text: str) -> bool:
+    """通过 ValuePattern 设置文本（不抢焦点、不碰剪贴板）"""
+    try:
+        pattern = control.GetValuePattern()
+        if pattern:
+            pattern.SetValue(text)
+            return True
+    except Exception as e:
+        log.debug(f"ValuePattern 失败: {e}")
+    return False
 
 
-class INPUT(ctypes.Structure):
-    _fields_ = [
-        ('type', wintypes.DWORD),
-        ('union', INPUT_UNION),
-    ]
+def _set_text_via_sendkeys(control: auto.Control, text: str) -> bool:
+    """通过 SendKeys 设置文本（可能抢焦点，作为备选）"""
+    try:
+        control.SendKeys('{Ctrl}a', waitTime=0.05)
+        control.SendKeys(text, waitTime=0.05)
+        return True
+    except Exception as e:
+        log.debug(f"SendKeys 失败: {e}")
+    return False
 
 
-def _send_key(vk: int, down: bool):
-    """通过 SendInput 发送单个键盘事件"""
-    flags = KEYEVENTF_KEYDOWN if down else KEYEVENTF_KEYUP
-    ki = KEYBDINPUT(vk, 0, flags, 0, 0)
-    inp = INPUT(INPUT_KEYBOARD, INPUT_UNION(ki=ki))
-    result = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-    if result != 1:
-        log.warning(f"SendInput key=0x{vk:02X} down={down} 返回 {result}")
+def _invoke_button(btn: auto.Control) -> bool:
+    """通过 InvokePattern 点击按钮（不抢焦点）"""
+    try:
+        pattern = btn.GetInvokePattern()
+        if pattern:
+            pattern.Invoke()
+            return True
+    except Exception as e:
+        log.debug(f"InvokePattern 失败: {e}")
 
-
-def _press(vk: int):
-    _send_key(vk, True)
-    time.sleep(0.02)
-    _send_key(vk, False)
-
-
-def _ctrl(vk: int):
-    _send_key(0x11, True)   # Ctrl down
-    time.sleep(0.01)
-    _send_key(vk, True)     # key down
-    time.sleep(0.03)
-    _send_key(vk, False)    # key up
-    time.sleep(0.01)
-    _send_key(0x11, False)  # Ctrl up
-
-
-def _click(x: int, y: int):
-    """通过 SendInput 在指定坐标点击鼠标左键"""
-    user32.SetCursorPos(x, y)
-    time.sleep(0.02)
-
-    # 左键按下
-    mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, 0)
-    inp = INPUT(INPUT_MOUSE, INPUT_UNION(mi=mi))
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-    time.sleep(0.02)
-
-    # 左键抬起
-    mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, 0)
-    inp = INPUT(INPUT_MOUSE, INPUT_UNION(mi=mi))
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    # 备选：Click（可能抢焦点）
+    try:
+        btn.Click()
+        return True
+    except Exception:
+        return False
 
 
 def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
     """
     发送微信消息
+
+    通过 UI Automation 与微信窗口交互，优先在不抢焦点、
+    不操作剪贴板的前提下完成发送。
 
     Args:
         chat_name: 联系人名称或备注
@@ -116,118 +106,113 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
     Returns:
         是否成功
     """
-    # 关闭浮动聊天窗口
-    def enum_close_floats(h, lp):
-        try:
-            b = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(h, b, 256)
-            if b.value == 'Qt51514QWindowIcon':
-                t = ctypes.create_unicode_buffer(256)
-                user32.GetWindowTextW(h, t, 256)
-                if t.value and t.value != '微信' and user32.IsWindowVisible(h):
-                    user32.PostMessageW(h, 0x0010, 0, 0)
-        except Exception as e:
-            log.warning(f"enum_close_floats hwnd={h}: {e}")
-        return True
-    user32.EnumWindows(
-        ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_int)(enum_close_floats), 0)
-
-    # 找主窗口
-    hwnds = []
-
-    def enum_find_main(h, lp):
-        try:
-            b = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(h, b, 256)
-            if b.value != 'Qt51514QWindowIcon':
-                return True
-            t = ctypes.create_unicode_buffer(256)
-            user32.GetWindowTextW(h, t, 256)
-            if t.value != '微信':
-                return True
-            if user32.IsWindowVisible(h):
-                hwnds.append(h)
-        except Exception as e:
-            log.warning(f"enum_find_main hwnd={h}: {e}")
-        return True
-    user32.EnumWindows(
-        ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_int)(enum_find_main), 0)
-
-    if not hwnds:
-        log.warning("找不到微信主窗口")
+    # 找微信主窗口
+    wechat = auto.WindowControl(Name='微信', searchDepth=1)
+    if not wechat.Exists(maxSearchSeconds=3):
+        log.warning("找不到微信窗口")
         return False
-    hwnd = hwnds[0]
 
-    wx_tid = user32.GetWindowThreadProcessId(hwnd, None)
-    cur_tid = kernel32.GetCurrentThreadId()
-    prev_fg = user32.GetForegroundWindow()
+    # 记录当前焦点窗口，以便后续恢复
+    prev_focus = auto.GetForegroundWindow()
 
-    attached = False
+    # 如果窗口最小化，需要恢复才能交互
     try:
-        user32.AttachThreadInput(cur_tid, wx_tid, True)
-        attached = True
+        pattern = wechat.GetWindowPattern()
+        if pattern:
+            visual_state = pattern.CurrentVisualState
+            if visual_state == auto.VisualState.Minimized:
+                log.info("微信窗口已最小化，尝试恢复")
+                pattern.SetVisualState(auto.VisualState.Normal)
+                time.sleep(0.3)
     except Exception as e:
-        log.warning(f"AttachThreadInput 失败: {e}")
+        log.debug(f"WindowPattern 操作失败: {e}")
 
-    try:
-        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        user32.SetWindowPos(hwnd, 0, 100, 100, 1000, 700, 0x0040)
-        user32.SetForegroundWindow(hwnd)
-        user32.BringWindowToTop(hwnd)
-        time.sleep(0.2)
+    # ---- 步骤1: 搜索联系人 ----
+    search = wechat.EditControl(searchDepth=_SEARCH_DEPTH)
+    if not search.Exists(maxSearchSeconds=2):
+        log.warning("找不到搜索框")
+        return False
 
-        r = wintypes.RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(r))
-        lx, ly, w, h = r.left, r.top, r.right - r.left, r.bottom - r.top
-
-        # 点搜索栏 → Ctrl+F
-        _click(lx + 150, ly + 55)
-        time.sleep(0.15)
-        _ctrl(0x46)
-        time.sleep(0.2)
-
-        # 粘贴联系人
-        pyperclip.copy(chat_name)
-        time.sleep(0.05)
-        _ctrl(0x56)
-        time.sleep(0.4)
-
-        # Enter 打开聊天
-        _press(0x0D)
-        time.sleep(0.5)
-
-        # 点输入框
-        _click(lx + int(w * 0.3), ly + h - 60)
-        time.sleep(0.15)
-
-        # 粘贴消息
-        pyperclip.copy(text)
-        time.sleep(0.05)
-        _ctrl(0x56)
-        time.sleep(0.2)
-
-        # Enter 发送
-        _press(0x0D)
-        time.sleep(0.15)
-
-        if minimize:
-            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
-
-        return True
-    finally:
-        if attached:
-            try:
-                user32.AttachThreadInput(cur_tid, wx_tid, False)
-            except Exception as e:
-                log.warning(f"AttachThreadInput(Detach) 失败: {e}")
+    # 先尝试 ValuePattern 写入联系人名（不抢焦点）
+    if not _set_text_via_value_pattern(search, chat_name):
+        # 备选：Click + SendKeys
         try:
-            if prev_fg and prev_fg != hwnd:
-                user32.SetForegroundWindow(prev_fg)
+            search.Click()
+            time.sleep(0.1)
+            search.SendKeys('{Ctrl}a', waitTime=0.1)
+            search.SendKeys(chat_name, waitTime=0.3)
         except Exception as e:
-            log.warning(f"恢复前台窗口失败: {e}")
+            log.error(f"搜索框输入失败: {e}")
+            return False
+
+    time.sleep(0.5)
+
+    # ---- 步骤2: 打开聊天 ----
+    # 尝试在搜索结果中找到对应联系人并点击
+    try:
+        target = wechat.ListItemControl(Name=chat_name, searchDepth=_SEARCH_DEPTH)
+        if target.Exists(maxSearchSeconds=1):
+            target.Click()
+        else:
+            # 备选：直接按 Enter（默认选择第一个结果）
+            search.SendKeys('{Enter}', waitTime=0.5)
+    except Exception as e:
+        log.debug(f"联系人选择失败: {e}")
+        search.SendKeys('{Enter}', waitTime=0.5)
+
+    time.sleep(0.5)
+
+    # ---- 步骤3: 在输入框中写入消息 ----
+    input_area = _find_input_area(wechat)
+    if input_area is None:
+        log.warning("找不到消息输入框")
+        return False
+
+    # 尝试 ValuePattern（不碰剪贴板）
+    if not _set_text_via_value_pattern(input_area, text):
+        # 备选：SendKeys
+        if not _set_text_via_sendkeys(input_area, text):
+            log.error("消息输入失败")
+            return False
+
+    time.sleep(0.2)
+
+    # ---- 步骤4: 发送 ----
+    send_btn = _find_send_button(wechat)
+    if send_btn is not None:
+        _invoke_button(send_btn)
+    else:
+        # 备选：Enter 键发送
+        try:
+            input_area.SendKeys('{Enter}', waitTime=0.2)
+        except Exception as e:
+            log.error(f"发送失败: {e}")
+            return False
+
+    time.sleep(0.2)
+
+    # ---- 步骤5: 最小化（可选） ----
+    if minimize:
+        try:
+            pattern = wechat.GetWindowPattern()
+            if pattern:
+                pattern.SetVisualState(auto.VisualState.Minimized)
+        except Exception as e:
+            log.debug(f"最小化失败: {e}")
+
+    # 恢复之前的前台窗口
+    try:
+        if prev_focus and prev_focus != wechat.NativeWindowHandle:
+            prev_control = auto.ControlFromHandle(prev_focus)
+            if prev_control.Exists(maxSearchSeconds=0):
+                prev_control.SetFocus()
+    except Exception:
+        pass
+
+    return True
 
 
-def send_batch(tasks: list, message: str = None) -> list:
+def send_batch(tasks: list, message: Optional[str] = None) -> List[Tuple[str, bool]]:
     """
     批量发送消息
 
@@ -238,7 +223,7 @@ def send_batch(tasks: list, message: str = None) -> list:
     Returns:
         [(联系人, 是否成功), ...]
     """
-    results = []
+    results: List[Tuple[str, bool]] = []
     total = len(tasks)
 
     for i, task in enumerate(tasks):
@@ -254,6 +239,7 @@ def send_batch(tasks: list, message: str = None) -> list:
         except Exception as e:
             log.error(f"发送给 {contact} 失败: {e}", exc_info=True)
             results.append((contact, False))
+
         time.sleep(0.1)
 
     return results

@@ -17,8 +17,14 @@ WeChat MCP Server
     }
   }
 """
-import os, sys, json, time, atexit, logging
+import json
+import logging
+import os
+import threading
+import time
 from typing import Optional
+
+import atexit
 
 from wx_mcp.key import extract_keys, find_wechat_pid, save_keys, load_keys
 from wx_mcp.decrypt import decrypt_database, get_db_salt, verify_page1, PAGE_SIZE
@@ -38,11 +44,27 @@ DECRYPTED_DIR = os.path.join(PROJECT_DIR, 'decrypted')
 WECHAT_DATA_DIR = os.path.expanduser('~/Documents/xwechat_files')
 DB_STORAGE_DIR = None  # 自动检测
 
-# ---- 模块级缓存 ----
+# ---- 模块级缓存 + 锁 ----
 _reader_instance = None
 _reader_decrypted_dir = None
 _keys_cache = None
 _db_storage_cache = None
+_decrypt_lock = threading.Lock()
+_reader_lock = threading.Lock()
+
+
+def _cleanup():
+    """退出时关闭数据库连接"""
+    global _reader_instance
+    if _reader_instance is not None:
+        try:
+            _reader_instance.close()
+        except Exception as e:
+            log.warning(f"reader 清理失败: {e}")
+        _reader_instance = None
+
+
+atexit.register(_cleanup)
 
 
 def find_db_storage() -> Optional[str]:
@@ -93,51 +115,56 @@ def get_key_for_db(keys: dict, db_path: str) -> Optional[bytes]:
 
 
 def ensure_decrypted():
-    """确保所有数据库已解密（幂等，重复调用快速返回）"""
-    global DB_STORAGE_DIR, _db_storage_cache
-    if DB_STORAGE_DIR is None:
-        DB_STORAGE_DIR = find_db_storage()
+    """确保所有数据库已解密（线程安全，幂等）"""
+    with _decrypt_lock:
+        global DB_STORAGE_DIR, _db_storage_cache
         if DB_STORAGE_DIR is None:
-            raise RuntimeError("找不到微信数据目录，请先登录微信")
+            DB_STORAGE_DIR = find_db_storage()
+            if DB_STORAGE_DIR is None:
+                raise RuntimeError("找不到微信数据目录，请先登录微信")
 
-    keys = _ensure_keys()
+        keys = _ensure_keys()
 
-    needed_dbs = [
-        'contact/contact.db',
-        'message/message_0.db',
-        'message/message_1.db',
-        'session/session.db',
-    ]
-    os.makedirs(DECRYPTED_DIR, exist_ok=True)
+        needed_dbs = [
+            'contact/contact.db',
+            'message/message_0.db',
+            'message/message_1.db',
+            'session/session.db',
+        ]
+        os.makedirs(DECRYPTED_DIR, exist_ok=True)
 
-    for rel in needed_dbs:
-        src = os.path.join(DB_STORAGE_DIR, rel)
-        dst = os.path.join(DECRYPTED_DIR, rel)
-        if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
-            continue
-        key = get_key_for_db(keys, src)
-        if not key:
-            log.warning(f"无密钥: {rel}")
-            continue
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        ok = decrypt_database(src, dst, key)
-        if ok:
-            log.info(f"已解密: {rel}")
-        else:
-            log.warning(f"解密失败: {rel}")
+        for rel in needed_dbs:
+            src = os.path.join(DB_STORAGE_DIR, rel)
+            dst = os.path.join(DECRYPTED_DIR, rel)
+            if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+                continue
+            key = get_key_for_db(keys, src)
+            if not key:
+                log.warning(f"无密钥: {rel}")
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            ok = decrypt_database(src, dst, key)
+            if ok:
+                log.info(f"已解密: {rel}")
+            else:
+                log.warning(f"解密失败: {rel}")
 
-    log.info(f"解密完成，数据在 {DECRYPTED_DIR}")
+        log.info(f"解密完成，数据在 {DECRYPTED_DIR}")
 
 
 def get_reader() -> WeChatReader:
-    """获取（缓存的）WeChatReader 实例"""
+    """获取（缓存的）WeChatReader 实例（线程安全）"""
     global _reader_instance, _reader_decrypted_dir
     if _reader_instance is not None and _reader_decrypted_dir == DECRYPTED_DIR:
         return _reader_instance
-    ensure_decrypted()
-    _reader_instance = WeChatReader(DECRYPTED_DIR)
-    _reader_decrypted_dir = DECRYPTED_DIR
-    return _reader_instance
+    with _reader_lock:
+        # 双重检查
+        if _reader_instance is not None and _reader_decrypted_dir == DECRYPTED_DIR:
+            return _reader_instance
+        ensure_decrypted()
+        _reader_instance = WeChatReader(DECRYPTED_DIR)
+        _reader_decrypted_dir = DECRYPTED_DIR
+        return _reader_instance
 
 
 # ---- 初始化 MCP Server ----
