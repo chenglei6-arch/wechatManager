@@ -39,8 +39,22 @@ log = logging.getLogger('wx-mcp')
 
 # ---- 路径配置 ----
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(SCRIPT_DIR)  # wx-mcp/
-KEYS_FILE = os.path.join(PROJECT_DIR, 'keys.json')
+PROJECT_DIR = os.path.dirname(SCRIPT_DIR)  # wx-mcp/src/ (editable install)
+
+# 向上查找 wx-mcp 项目根目录（找 pyproject.toml 或 keys.json）
+def _find_project_root(start: str) -> str:
+    d = start
+    for _ in range(5):  # 最多向上 5 层
+        if os.path.exists(os.path.join(d, 'pyproject.toml')) or os.path.exists(os.path.join(d, 'keys.json')):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return start
+
+PROJECT_ROOT = _find_project_root(PROJECT_DIR)
+KEYS_FILE = os.path.join(PROJECT_ROOT, 'keys.json')
 WECHAT_DATA_DIR = os.path.expanduser('~/Documents/xwechat_files')
 
 # 需要解密的数据库文件（相对于 DB_STORAGE_DIR）
