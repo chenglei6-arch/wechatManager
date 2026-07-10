@@ -416,16 +416,10 @@ def status_resource() -> str:
 
 # ---- 启动 ----
 def main():
-    """启动 MCP Server"""
+    """启动 MCP Server（不阻塞等待解密，各 tool 首次调用时按需解密）"""
     log.info("WeChat MCP Server 启动中...")
     log.info("解密临时目录: %s", _state.decrypted_dir)
-    try:
-        ensure_decrypted()
-    except Exception as e:
-        log.warning("初始化失败: %s", e)
-        log.warning("启动后可使用 wechat_status 检查状态")
-
-    log.info("WeChat MCP Server 已就绪")
+    log.info("MCP Server 已就绪（解密将在首次调用 tool 时按需进行）")
     mcp.run()
 
 
