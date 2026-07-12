@@ -67,15 +67,17 @@ class TestFindWechatPid(unittest.TestCase):
 class TestExtractKeys(unittest.TestCase):
     """从进程内存提取密钥测试"""
 
+    @patch('wx_mcp.key._scan_private_memory')
     @patch('wx_mcp.key.pymem.Pymem')
-    def test_extract_keys_success(self, mock_pymem_class):
+    def test_extract_keys_success(self, mock_pymem_class, mock_scan):
         mock_pm = MagicMock()
         mock_pymem_class.return_value = mock_pm
+        # _scan_private_memory 替代原来的 pattern_scan_all
+        mock_scan.return_value = [0x1000]
 
         # 模拟内存扫描结果：一个密钥对
         raw_data = b"x'8eb5dc3f0697db96c151dd768dd34e85552f80820ff543e16115e244199c2371" \
                    b"0ad62a412425fef8938a2677ed3bc173'"
-        mock_pm.pattern_scan_all.return_value = [0x1000]
         mock_pm.read_bytes.return_value = raw_data
 
         keys = key.extract_keys(target_pid=1234)
@@ -87,21 +89,23 @@ class TestExtractKeys(unittest.TestCase):
             '8eb5dc3f0697db96c151dd768dd34e85552f80820ff543e16115e244199c2371',
         )
 
+    @patch('wx_mcp.key._scan_private_memory')
     @patch('wx_mcp.key.pymem.Pymem')
-    def test_extract_keys_no_matches(self, mock_pymem_class):
+    def test_extract_keys_no_matches(self, mock_pymem_class, mock_scan):
         mock_pm = MagicMock()
         mock_pymem_class.return_value = mock_pm
-        mock_pm.pattern_scan_all.return_value = []
+        mock_scan.return_value = []
 
         keys = key.extract_keys(target_pid=1234)
         self.assertEqual(keys, {})
 
+    @patch('wx_mcp.key._scan_private_memory')
     @patch('wx_mcp.key.pymem.Pymem')
-    def test_extract_keys_skips_garbage_addresses(self, mock_pymem_class):
+    def test_extract_keys_skips_garbage_addresses(self, mock_pymem_class, mock_scan):
         """第一个地址读取失败被跳过，第二个成功提取"""
         mock_pm = MagicMock()
         mock_pymem_class.return_value = mock_pm
-        mock_pm.pattern_scan_all.return_value = [0x1000, 0x2000]
+        mock_scan.return_value = [0x1000, 0x2000]
 
         valid_entry = ("x'" + "a" * 64 + "b" * 32 + "'").encode('utf-8')
         mock_pm.read_bytes.side_effect = [
@@ -111,17 +115,18 @@ class TestExtractKeys(unittest.TestCase):
 
         keys = key.extract_keys(target_pid=1234)
         self.assertEqual(len(keys), 1)
-        self.assertIn("b" * 32, keys)  # salt 是 key
+        self.assertIn("b" * 32, keys)  # salt
         self.assertEqual(keys["b" * 32], "a" * 64)
 
+    @patch('wx_mcp.key._scan_private_memory')
     @patch('wx_mcp.key.find_wechat_pid')
     @patch('wx_mcp.key.pymem.Pymem')
-    def test_extract_keys_auto_pid(self, mock_pymem_class, mock_find_pid):
+    def test_extract_keys_auto_pid(self, mock_pymem_class, mock_find_pid, mock_scan):
         """不传 PID 时自动查找"""
         mock_find_pid.return_value = 5678
         mock_pm = MagicMock()
         mock_pymem_class.return_value = mock_pm
-        mock_pm.pattern_scan_all.return_value = []
+        mock_scan.return_value = []
 
         keys = key.extract_keys()
         self.assertEqual(keys, {})

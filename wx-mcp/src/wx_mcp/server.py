@@ -96,7 +96,7 @@ class ServerState:
     reader_decrypted_dir: str = ''
 
     # 并发锁
-    decrypt_lock: threading.Lock = field(default_factory=threading.Lock)
+    decrypt_lock: threading.RLock = field(default_factory=threading.RLock)
     reader_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
