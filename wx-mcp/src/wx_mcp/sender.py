@@ -45,6 +45,9 @@ _kernel32.GlobalUnlock.argtypes = [ctypes.wintypes.HGLOBAL]
 _kernel32.GlobalFree.restype = ctypes.wintypes.BOOL
 _kernel32.GlobalFree.argtypes = [ctypes.wintypes.HGLOBAL]
 
+# kernel32 额外函数
+_kernel32.GetCurrentThreadId.restype = ctypes.wintypes.DWORD
+
 _GMEM_MOVABLE = 0x0002
 
 
@@ -121,7 +124,7 @@ class _SafeForeground:
     def __enter__(self):
         self.prev_hwnd = _user32.GetForegroundWindow()
         self.target_tid = _get_window_thread_id(self.hwnd)
-        self.current_tid = _user32.GetCurrentThreadId()
+        self.current_tid = _kernel32.GetCurrentThreadId()
 
         # 最小化则恢复
         if _user32.IsIconic(self.hwnd):
@@ -177,7 +180,7 @@ def _restore_and_foreground(hwnd: int) -> bool:
     # AttachThreadInput：将调用线程附加到目标窗口的输入线程，
     # 这样 SetForegroundWindow 就能跨进程生效
     target_tid = _get_window_thread_id(hwnd)
-    current_tid = _user32.GetCurrentThreadId()
+    current_tid = _kernel32.GetCurrentThreadId()
     attached = False
     if target_tid and target_tid != current_tid:
         _user32.AttachThreadInput(current_tid, target_tid, True)
