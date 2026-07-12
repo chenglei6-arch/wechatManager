@@ -179,8 +179,34 @@ def get_key_for_db(db_path: str) -> Optional[bytes]:
     return None
 
 
+def _needs_refresh(src: str, dst: str) -> bool:
+    """检查源数据库是否需要重新解密
+
+    微信4.x使用WAL模式写入，新消息先写入 .db-wal 文件。
+    本函数同时检查主文件 .db 和 .db-wal 的修改时间，
+    确保WAL中有新数据时能触发重新解密。
+    """
+    if not os.path.exists(dst):
+        return True
+    dst_mtime = os.path.getmtime(dst)
+    # 检查主文件 .db
+    if os.path.getmtime(src) > dst_mtime:
+        return True
+    # 检查 WAL 文件（微信实时写入，主文件 mtime 可能不变）
+    for ext in ('-wal', '-shm'):
+        wal = src + ext
+        if os.path.exists(wal) and os.path.getsize(wal) > 0:
+            if os.path.getmtime(wal) > dst_mtime:
+                return True
+    return False
+
+
 def ensure_decrypted():
-    """确保所有数据库已解密（线程安全，幂等）"""
+    """确保所有数据库已解密（线程安全，幂等）
+
+    每次调用时通过 _needs_refresh 检测源数据库是否有新数据，
+    包括检查 .db-wal 文件的变更。若有更新则重新解密。
+    """
     with _state.decrypt_lock:
         if _state.db_storage_dir is None:
             _state.db_storage_dir = find_db_storage()
@@ -191,10 +217,14 @@ def ensure_decrypted():
 
         os.makedirs(_state.decrypted_dir, exist_ok=True)
 
+        any_decrypted = False
         for rel in _REQUIRED_DBS:
             src = os.path.join(_state.db_storage_dir, rel)
             dst = os.path.join(_state.decrypted_dir, rel)
-            if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+            if not os.path.exists(src):
+                log.warning("源数据库不存在: %s", src)
+                continue
+            if not _needs_refresh(src, dst):
                 continue
             log.info("解密: %s ...", rel)
             key = get_key_for_db(src)
@@ -205,22 +235,60 @@ def ensure_decrypted():
             ok = decrypt_database(src, dst, key)
             if ok:
                 log.info("已解密: %s", rel)
+                any_decrypted = True
             else:
                 log.warning("解密失败: %s", rel)
 
-        log.info("解密完成，数据在 %s", _state.decrypted_dir)
+        if any_decrypted:
+            log.info("解密完成，数据在 %s", _state.decrypted_dir)
+
+        # 如果重新解密了，关闭旧的 reader 连接使其下次重建
+        if any_decrypted and _state.reader is not None:
+            try:
+                _state.reader.close()
+            except Exception:
+                pass
+            _state.reader = None
+
+
+def _any_db_needs_refresh() -> bool:
+    """检查是否有数据库文件在上次解密后发生了变更
+
+    微信新消息到达时 .db-wal 文件会更新，即使 .db 主文件 mtime 不变。
+    此函数同时检查 .db 和 .db-wal，确保不会漏掉增量数据。
+    """
+    if _state.db_storage_dir is None:
+        return True
+    for rel in _REQUIRED_DBS:
+        src = os.path.join(_state.db_storage_dir, rel)
+        dst = os.path.join(_state.decrypted_dir, rel)
+        if os.path.exists(src) and _needs_refresh(src, dst):
+            return True
+    return False
 
 
 def get_reader() -> WeChatReader:
-    """获取（缓存的）WeChatReader 实例（线程安全）"""
+    """获取（缓存的）WeChatReader 实例（线程安全）
+
+    即使有缓存也会检查源数据库文件 mtime（含 .db-wal），
+    检测到新数据时自动重新解密，确保始终返回最新消息。
+    """
+    # 快速路径：缓存有效且数据库未变更
     if _state.reader is not None and _state.reader_decrypted_dir == _state.decrypted_dir:
-        return _state.reader
-    with _state.reader_lock:
-        if _state.reader is not None and _state.reader_decrypted_dir == _state.decrypted_dir:
+        if not _any_db_needs_refresh():
             return _state.reader
-        ensure_decrypted()
+
+    with _state.reader_lock:
+        # 双检锁：另一个线程可能已经在我们等待锁时完成了刷新
+        if _state.reader is not None and _state.reader_decrypted_dir == _state.decrypted_dir:
+            if not _any_db_needs_refresh():
+                return _state.reader
+
+        # 数据已过时，关闭旧 reader 重新解密
         if _state.reader is not None:
             _state.reader.close()
+            _state.reader = None
+        ensure_decrypted()
         _state.reader = WeChatReader(_state.decrypted_dir)
         _state.reader_decrypted_dir = _state.decrypted_dir
         return _state.reader
@@ -551,6 +619,48 @@ def batch_send_messages(contacts: list, message: str) -> str:
     except Exception as e:
         log.error("batch_send_messages 失败: %s", e, exc_info=True)
         return f"❌ 批量发送失败: {e}"
+
+
+@mcp.tool()
+def refresh_data() -> str:
+    """
+    强制刷新解密数据缓存
+
+    ⚠️ 通常无需手动调用 — read_messages / list_contacts / get_recent_sessions
+    已自带自动刷新检测，数据变更时会自动重新解密。
+
+    仅当自动刷新未能获取最新数据时，才使用此工具强制重建完整缓存。
+    """
+    try:
+        with _state.decrypt_lock:
+            # 重新设置 reader，强制下次调用时重新解密
+            if _state.reader is not None:
+                _state.reader.close()
+                _state.reader = None
+
+            # 删除旧的解密文件标记，强制重新解密
+            import shutil
+            old_dir = _state.decrypted_dir
+            # 新建一个临时目录来保存重新解密的数据
+            import tempfile
+            new_dir = tempfile.mkdtemp(prefix='wx_mcp_')
+            _state.decrypted_dir = new_dir
+            _state.reader_decrypted_dir = ''
+
+        # 在新目录中重新解密
+        get_reader()
+
+        # 清理旧目录（后台）
+        if os.path.exists(old_dir):
+            try:
+                shutil.rmtree(old_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+        return "✅ 数据缓存已刷新，正在读取最新数据..."
+    except Exception as e:
+        log.error("refresh_data 失败: %s", e, exc_info=True)
+        return f"❌ 刷新失败: {e}"
 
 
 @mcp.tool()
