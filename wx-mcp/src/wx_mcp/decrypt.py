@@ -5,6 +5,7 @@ WeChat 4.x SQLCipher 4 数据库解密
 """
 import hashlib
 import hmac as hmac_mod
+import logging
 import os
 import struct
 from Crypto.Cipher import AES
@@ -15,6 +16,8 @@ IV_SIZE = 16
 HMAC_SIZE = 64
 RESERVE_SIZE = 80  # IV(16) + HMAC(64)
 SQLITE_HEADER = b'SQLite format 3\x00'
+
+log = logging.getLogger('wx-mcp.decrypt')
 
 
 def derive_mac_key(enc_key: bytes, salt: bytes) -> bytes:

@@ -17,6 +17,7 @@ WeChat MCP Server
     }
   }
 """
+import asyncio
 import json
 import logging
 import os
@@ -183,30 +184,22 @@ def get_key_for_db(db_path: str) -> Optional[bytes]:
 def _needs_refresh(src: str, dst: str) -> bool:
     """检查源数据库是否需要重新解密
 
-    微信4.x使用WAL模式写入，新消息先写入 .db-wal 文件。
-    本函数同时检查主文件 .db 和 .db-wal 的修改时间，
-    确保WAL中有新数据时能触发重新解密。
+    只检查主 .db 文件的修改时间。.db-wal / .db-shm 的变化不会触发重新解密，
+    因为逐页面解密只处理主 .db 文件，不包含 WAL 中的增量数据。
+    WAL 数据需要等待 checkpoint 合并到主 .db 后才能被解密捕获。
     """
     if not os.path.exists(dst):
         return True
-    dst_mtime = os.path.getmtime(dst)
-    # 检查主文件 .db
-    if os.path.getmtime(src) > dst_mtime:
+    if os.path.getmtime(src) > os.path.getmtime(dst):
         return True
-    # 检查 WAL 文件（微信实时写入，主文件 mtime 可能不变）
-    for ext in ('-wal', '-shm'):
-        wal = src + ext
-        if os.path.exists(wal) and os.path.getsize(wal) > 0:
-            if os.path.getmtime(wal) > dst_mtime:
-                return True
     return False
 
 
 def ensure_decrypted():
     """确保所有数据库已解密（线程安全，幂等）
 
-    每次调用时通过 _needs_refresh 检测源数据库是否有新数据，
-    包括检查 .db-wal 文件的变更。若有更新则重新解密。
+    每次调用时通过 _needs_refresh 检测源主 .db 文件 mtime 是否更新。
+    若有更新（WAL checkpoint 发生）则重新解密。
     """
     with _state.decrypt_lock:
         if _state.db_storage_dir is None:
@@ -253,10 +246,10 @@ def ensure_decrypted():
 
 
 def _any_db_needs_refresh() -> bool:
-    """检查是否有数据库文件在上次解密后发生了变更
+    """检查是否有数据库的主 .db 文件在上次解密后发生了变更
 
-    微信新消息到达时 .db-wal 文件会更新，即使 .db 主文件 mtime 不变。
-    此函数同时检查 .db 和 .db-wal，确保不会漏掉增量数据。
+    只检查主 .db 文件的 mtime，忽略 .db-wal 的变化。
+    （.db-wal 数据在 checkpoint 后会合并到主 .db 中）
     """
     if _state.db_storage_dir is None:
         return True
@@ -429,17 +422,24 @@ def read_messages(talker: str, limit: int = 30) -> str:
 
 
 @mcp.tool()
-def wait_for_new_messages(talker: str, timeout_seconds: int = 120) -> str:
+async def wait_for_new_messages(talker: str, timeout_seconds: int = 120) -> str:
     """
-    等待指定联系人的新消息（阻塞等待，内部 2 秒轮询）。
+    等待指定联系人的新消息（阻塞等待，内部 5 秒轮询，事件循环友好）。
 
-    此工具会在 MCP 服务端内部以 ~2 秒间隔轮询微信数据库，
+    此工具在 MCP 服务端内以 ~5 秒间隔轮询微信数据库，
     一旦检测到来自该联系人的新消息立即返回。
 
+    async 实现使用 asyncio.sleep()，不阻塞事件循环，
+    因此等待期间其他 MCP 工具仍可正常调用。
+
     💡 相比「每分钟用 Cron 调度 read_messages」的方式：
-      - 有新消息时秒级响应（~2 秒延迟）
+      - 有新消息时秒级响应（~5 秒延迟）
       - 无消息时不消耗任何 Token 和上下文
       - 不需要反复调度 Cron
+
+    注意：消息检测依赖于微信的 WAL checkpoint 机制，
+    新消息写入后需等待 checkpoint 合并到主数据库才能被检测到，
+    通常延迟在 5~20 秒内。
 
     使用场景：聊天监控循环
       1. 调用此工具等待新消息
@@ -452,7 +452,7 @@ def wait_for_new_messages(talker: str, timeout_seconds: int = 120) -> str:
     """
     start = time.time()
     max_timeout = min(timeout_seconds, 600)
-    poll_interval = 2.0
+    poll_interval = 5.0
 
     # ---- Phase 1: 解析联系人信息 ----
     try:
@@ -468,16 +468,24 @@ def wait_for_new_messages(talker: str, timeout_seconds: int = 120) -> str:
         log.error("wait_for_new_messages: 初始化失败: %s", e, exc_info=True)
         return f"❌ 初始化失败: {e}"
 
-    # ---- Phase 2: 获取基准状态（当前最新消息的 local_id） ----
+    # ---- Phase 2: 获取基准状态（当前最新消息的 local_id + 源 .db mtime） ----
     try:
         latest = reader.get_messages(talker_id, limit=1)
-        if latest:
-            last_local_id = latest[0].get('local_id', 0)
-        else:
-            last_local_id = 0
+        last_local_id = latest[0].get('local_id', 0) if latest else 0
     except Exception as e:
         log.error("wait_for_new_messages: 获取基准消息失败: %s", e)
         return f"❌ 读取聊天记录失败: {e}"
+
+    # 记录消息库源文件路径（用于 mtime 检测 checkpoint）
+    src_dbs: list[str] = []
+    if _state.db_storage_dir:
+        for rel in ['message/message_0.db', 'message/message_1.db']:
+            p = os.path.join(_state.db_storage_dir, rel)
+            if os.path.exists(p):
+                src_dbs.append(p)
+
+    last_db_mtime = max((os.path.getmtime(p) for p in src_dbs), default=0)
+    last_wal_sizes: dict[str, int] = {}
 
     log.info("wait_for_new_messages: 开始监控 '%s' (timeout=%ds, poll=%.1fs, last_local_id=%s)",
              display_name, max_timeout, poll_interval, last_local_id)
@@ -485,24 +493,86 @@ def wait_for_new_messages(talker: str, timeout_seconds: int = 120) -> str:
     # ---- Phase 3: 轮询循环 ----
     while True:
         elapsed = time.time() - start
-        remaining = max_timeout - elapsed
-        if remaining <= 0:
+        if elapsed >= max_timeout:
             log.info("wait_for_new_messages: 超时，无新消息 from '%s'", display_name)
             return (
                 f"⏱️ 监控 {display_name} 超时 ({max_timeout} 秒)，未收到新消息\n\n"
                 "如需继续监控，可再次调用此工具，或使用 read_messages 查看是否有遗漏消息"
             )
 
-        time.sleep(poll_interval)
+        await asyncio.sleep(poll_interval)
 
-        # 检查数据库变更（get_reader 自动检测 mtime，无变更时不重新解密）
-        try:
-            reader = get_reader()
-        except Exception:
-            # 数据库暂时不可用，下次循环再试
-            continue
+        # ---- Step A: 检测源 .db mtime 变化（WAL checkpoint 发生） ----
+        current_db_mtime = max((os.path.getmtime(p) for p in src_dbs), default=0)
+        checkpoint_happened = current_db_mtime > last_db_mtime
 
-        # 轻量检查：读取最新一条消息
+        if checkpoint_happened:
+            log.info("wait_for_new_messages: 检测到 checkpoint，重新解密数据库")
+            try:
+                reader = get_reader()  # 触发重新解密，新数据可用
+                last_db_mtime = current_db_mtime
+            except Exception as e:
+                log.warning("wait_for_new_messages: get_reader 失败: %s", e)
+                continue
+
+        # ---- Step B: 检测 WAL 增长（新数据到达但尚未 checkpoint） ----
+        wal_grew = False
+        for p in src_dbs:
+            wal_path = p + '-wal'
+            if not os.path.exists(wal_path):
+                continue
+            try:
+                cur_sz = os.path.getsize(wal_path)
+                prev = last_wal_sizes.get(p, cur_sz)
+                if cur_sz > prev:
+                    wal_grew = True
+                last_wal_sizes[p] = cur_sz
+            except OSError:
+                pass
+
+        if wal_grew and not checkpoint_happened:
+            # WAL 有增长但主 .db 还没 checkpoint — 持续等待 checkpoint 到来
+            log.info("wait_for_new_messages: 检测到 WAL 增长，等待 checkpoint ...")
+            while time.time() - start < max_timeout:
+                await asyncio.sleep(2)
+                current_db_mtime = max((os.path.getmtime(p) for p in src_dbs), default=0)
+                if current_db_mtime > last_db_mtime:
+                    log.info("wait_for_new_messages: checkpoint 到达，重新解密数据库")
+                    try:
+                        reader = get_reader()
+                        last_db_mtime = current_db_mtime
+                    except Exception:
+                        pass
+                    # 在子循环中立即检查一次新消息
+                    await asyncio.sleep(0.1)
+                    try:
+                        current = reader.get_messages(talker_id, limit=1)
+                        if current and current[0].get('local_id', 0) > last_local_id:
+                            all_msgs = reader.get_messages(talker_id, limit=30)
+                            new_msgs = [m for m in all_msgs if m.get('local_id', 0) > last_local_id]
+                            log.info("wait_for_new_messages: 检测到 %d 条新消息 from '%s'",
+                                     len(new_msgs), display_name)
+                            lines = [f"📨 收到 {display_name} 的新消息 ({len(new_msgs)} 条):", ""]
+                            for m in reversed(new_msgs):
+                                content = str(m.get('content', '')) or ''
+                                msg_time = m.get('time', '')
+                                msg_type = m.get('type', 0)
+                                sender = m.get('real_sender_id', '') or ''
+                                t = _MSG_TYPE_LABELS.get(msg_type, f'type{msg_type}')
+                                if msg_type == 1:
+                                    entry = f"  [{msg_time}]"
+                                    if sender:
+                                        entry += f" {sender}:"
+                                    entry += f" {content[:200]}"
+                                else:
+                                    entry = f"  [{msg_time}] [{t}] {content[:100]}"
+                                lines.append(entry)
+                            return "\n".join(lines)
+                    except Exception:
+                        pass
+                    break  # checkpoint 已处理，回到主循环
+
+        # ---- Step C: 轻量检查最新消息 ----
         try:
             current = reader.get_messages(talker_id, limit=1)
             if not current:
