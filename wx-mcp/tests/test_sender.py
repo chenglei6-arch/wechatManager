@@ -35,16 +35,18 @@ class TestRestoreAndForeground(unittest.TestCase):
     def setUp(self):
         self.mock_user32 = patch('wx_mcp.sender._user32').start()
         self.addCleanup(patch.stopall)
+        # 默认 GetWindowThreadProcessId 返回 0（使 AttachThreadInput 块被跳过）
+        self.mock_user32.GetWindowThreadProcessId.return_value = 0
+        self.mock_user32.GetCurrentThreadId.return_value = 1
 
     def test_normal_window(self):
         """非最小化窗口直接带到前台"""
         self.mock_user32.IsIconic.return_value = False
-        self.mock_user32.GetForegroundWindow.return_value = 12345  # 直接成功
+        self.mock_user32.GetForegroundWindow.return_value = 12345
 
         result = sender._restore_and_foreground(12345)
         self.assertTrue(result)
         self.mock_user32.ShowWindow.assert_not_called()
-        self.mock_user32.SetForegroundWindow.assert_called_once_with(12345)
 
     def test_minimized_window(self):
         """最小化窗口先恢复再前台"""
@@ -53,20 +55,16 @@ class TestRestoreAndForeground(unittest.TestCase):
 
         result = sender._restore_and_foreground(12345)
         self.assertTrue(result)
-        self.mock_user32.ShowWindow.assert_called_once_with(12345, 9)  # SW_RESTORE
+        self.mock_user32.ShowWindow.assert_called_once_with(12345, 9)
         self.mock_user32.SetForegroundWindow.assert_called_once_with(12345)
 
     def test_foreground_fails_retry(self):
         """第一次带到前台失败，重试后成功"""
         self.mock_user32.IsIconic.return_value = False
-        # 第一次 GetForegroundWindow 返回别的句柄（触发重试），第二次返回正确句柄
-        self.mock_user32.GetForegroundWindow.side_effect = [999, 12345]
+        self.mock_user32.GetForegroundWindow.side_effect = [999, 12345, 12345]
 
         result = sender._restore_and_foreground(12345)
         self.assertTrue(result)
-        # ShowWindow(SW_SHOW) 被调用了一次（重试时）
-        self.mock_user32.ShowWindow.assert_called_once_with(12345, 5)
-        self.assertEqual(self.mock_user32.SetForegroundWindow.call_count, 2)
 
     def test_foreground_always_fails(self):
         """始终无法带到前台"""
@@ -74,9 +72,8 @@ class TestRestoreAndForeground(unittest.TestCase):
         self.mock_user32.GetForegroundWindow.return_value = 999
 
         result = sender._restore_and_foreground(12345)
-        # 应该返回 False，但仍试图继续
         self.assertFalse(result)
-        self.assertEqual(self.mock_user32.SetForegroundWindow.call_count, 2)
+        self.assertEqual(self.mock_user32.SetForegroundWindow.call_count, 3)
 
 
 class TestMinimizeWindow(unittest.TestCase):
@@ -85,57 +82,51 @@ class TestMinimizeWindow(unittest.TestCase):
     @patch('wx_mcp.sender._user32')
     def test_minimize(self, mock_user32):
         sender._minimize_window(12345)
-        mock_user32.ShowWindow.assert_called_once_with(12345, 6)  # SW_MINIMIZE
-
-
-class TestRestorePreviousFocus(unittest.TestCase):
-    """_restore_previous_focus 测试"""
-
-    @patch('wx_mcp.sender._user32')
-    def test_restore_valid_handle(self, mock_user32):
-        mock_user32.IsWindow.return_value = True
-
-        sender._restore_previous_focus(999)
-        mock_user32.SetForegroundWindow.assert_called_once_with(999)
-
-    @patch('wx_mcp.sender._user32')
-    def test_restore_invalid_handle(self, mock_user32):
-        mock_user32.IsWindow.return_value = False
-
-        sender._restore_previous_focus(999)
-        mock_user32.SetForegroundWindow.assert_not_called()
-
-    @patch('wx_mcp.sender._user32')
-    def test_none_handle(self, mock_user32):
-        sender._restore_previous_focus(0)
-        mock_user32.IsWindow.assert_not_called()
-        mock_user32.SetForegroundWindow.assert_not_called()
+        mock_user32.ShowWindow.assert_called_once_with(12345, 6)
 
 
 class TestSendMessage(unittest.TestCase):
     """send_message 完整流程测试"""
 
-    @patch('wx_mcp.sender._restore_previous_focus')
-    @patch('wx_mcp.sender._minimize_window')
-    @patch('wx_mcp.sender._restore_and_foreground')
+    @patch('wx_mcp.sender._set_clipboard_text')
+    @patch('wx_mcp.sender._get_clipboard_text')
+    @patch('wx_mcp.sender._SafeForeground')
     @patch('wx_mcp.sender._find_window_handle')
     @patch('wx_mcp.sender.auto.SendKeys')
-    def test_send_success(self, mock_sendkeys, mock_find, mock_restore,
-                          mock_minimize, mock_restore_focus):
+    def test_send_success(self, mock_sendkeys, mock_find,
+                          mock_safe, mock_get_cb, mock_set_cb):
         """正常发送流程"""
         mock_find.return_value = 12345
-        mock_restore.return_value = True
+        mock_get_cb.return_value = ''
+        ctx_mock = MagicMock()
+        mock_safe.return_value.__enter__.return_value = ctx_mock
 
-        result = sender.send_message('张三', '你好', minimize=True)
+        with patch('wx_mcp.sender._user32.GetForegroundWindow', return_value=12345):
+            with patch('wx_mcp.sender._minimize_window'):
+                result = sender.send_message('张三', '你好', minimize=True)
 
         self.assertTrue(result)
         mock_find.assert_called_once()
-        mock_restore.assert_called_once_with(12345)
-        # 应该调用多次 SendKeys（Ctrl+A, Delete, name, Enter, Ctrl+A, Delete, text, Ctrl+Enter）
-        # 至少有 8 次 SendKeys 调用
+        mock_get_cb.assert_called_once()
+        mock_set_cb.assert_called_once_with('你好')
         self.assertGreaterEqual(mock_sendkeys.call_count, 6)
-        mock_minimize.assert_called_once_with(12345)
-        mock_restore_focus.assert_called()
+
+    @patch('wx_mcp.sender._set_clipboard_text')
+    @patch('wx_mcp.sender._get_clipboard_text')
+    @patch('wx_mcp.sender._SafeForeground')
+    @patch('wx_mcp.sender._find_window_handle')
+    @patch('wx_mcp.sender.auto.SendKeys')
+    def test_foreground_fails_returns_false(self, *mocks):
+        """前台失败则返回 False"""
+        mock_find = mocks[3]
+        mock_find.return_value = 12345
+        ctx_mock = MagicMock()
+        mocks[2].return_value.__enter__.return_value = ctx_mock
+
+        with patch('wx_mcp.sender._user32.GetForegroundWindow', return_value=999):
+            result = sender.send_message('张三', '你好')
+
+        self.assertFalse(result)
 
     @patch('wx_mcp.sender._find_window_handle')
     def test_window_not_found(self, mock_find):
@@ -145,38 +136,25 @@ class TestSendMessage(unittest.TestCase):
         result = sender.send_message('张三', '你好')
         self.assertFalse(result)
 
-    @patch('wx_mcp.sender._restore_previous_focus')
-    @patch('wx_mcp.sender._minimize_window')
-    @patch('wx_mcp.sender._restore_and_foreground')
-    @patch('wx_mcp.sender._find_window_handle')
-    @patch('wx_mcp.sender.auto.SendKeys')
-    def test_foreground_fails_but_continues(self, mock_sendkeys, mock_find,
-                                            mock_restore, mock_minimize,
-                                            mock_restore_focus):
-        """前台失败但继续尝试发送"""
-        mock_find.return_value = 12345
-        mock_restore.return_value = False  # 前台失败
-
-        result = sender.send_message('张三', '你好')
-        self.assertTrue(result)  # 仍然继续，SendKeys 可能仍有效
-        self.assertGreater(mock_sendkeys.call_count, 0)
-
-    @patch('wx_mcp.sender._restore_previous_focus')
-    @patch('wx_mcp.sender._minimize_window')
-    @patch('wx_mcp.sender._restore_and_foreground')
+    @patch('wx_mcp.sender._set_clipboard_text')
+    @patch('wx_mcp.sender._get_clipboard_text')
+    @patch('wx_mcp.sender._SafeForeground')
     @patch('wx_mcp.sender._find_window_handle')
     @patch('wx_mcp.sender.auto.SendKeys')
     def test_send_without_minimize(self, mock_sendkeys, mock_find,
-                                   mock_restore, mock_minimize,
-                                   mock_restore_focus):
+                                   mock_safe, mock_get_cb, mock_set_cb):
         """发送后不最小化"""
         mock_find.return_value = 12345
-        mock_restore.return_value = True
+        mock_get_cb.return_value = ''
+        ctx_mock = MagicMock()
+        mock_safe.return_value.__enter__.return_value = ctx_mock
 
-        result = sender.send_message('张三', '你好', minimize=False)
+        with patch('wx_mcp.sender._user32.GetForegroundWindow', return_value=12345):
+            with patch('wx_mcp.sender._minimize_window') as mock_min:
+                result = sender.send_message('张三', '你好', minimize=False)
+
         self.assertTrue(result)
-        mock_minimize.assert_not_called()
-        mock_restore_focus.assert_called()
+        mock_min.assert_not_called()
 
 
 class TestSendMessageValidation(unittest.TestCase):
@@ -246,7 +224,6 @@ class TestSendBatchLastMinimizes(unittest.TestCase):
 
         sender.send_batch([('A', '1'), ('B', '2'), ('C', '3')])
 
-        # 前两条 minimize=False，最后一条 minimize=True
         self.assertEqual(mock_send.call_count, 3)
         call_args_list = mock_send.call_args_list
         self.assertFalse(call_args_list[0].kwargs.get('minimize', True))

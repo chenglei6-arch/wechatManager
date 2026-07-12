@@ -22,6 +22,133 @@ _WECHAT_WINDOW_TITLE = '微信'
 
 # 共享的 user32 实例
 _user32 = ctypes.windll.user32
+_user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+_user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.DWORD)]
+
+# 剪贴板 API
+_user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+_user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
+_user32.OpenClipboard.argtypes = [ctypes.wintypes.HWND]
+_user32.CloseClipboard.restype = ctypes.wintypes.BOOL
+_user32.EmptyClipboard.restype = ctypes.wintypes.BOOL
+_user32.SetClipboardData.restype = ctypes.wintypes.HANDLE
+_user32.SetClipboardData.argtypes = [ctypes.wintypes.UINT, ctypes.wintypes.HANDLE]
+_user32.GetClipboardData.restype = ctypes.wintypes.HANDLE
+_user32.GetClipboardData.argtypes = [ctypes.wintypes.UINT]
+_kernel32 = ctypes.windll.kernel32
+_kernel32.GlobalAlloc.restype = ctypes.wintypes.HGLOBAL
+_kernel32.GlobalAlloc.argtypes = [ctypes.wintypes.UINT, ctypes.c_size_t]
+_kernel32.GlobalLock.restype = ctypes.wintypes.LPVOID
+_kernel32.GlobalLock.argtypes = [ctypes.wintypes.HGLOBAL]
+_kernel32.GlobalUnlock.restype = ctypes.wintypes.BOOL
+_kernel32.GlobalUnlock.argtypes = [ctypes.wintypes.HGLOBAL]
+_kernel32.GlobalFree.restype = ctypes.wintypes.BOOL
+_kernel32.GlobalFree.argtypes = [ctypes.wintypes.HGLOBAL]
+
+_GMEM_MOVABLE = 0x0002
+
+
+def _set_clipboard_text(text: str):
+    """设置剪贴板文本（UTF-16）"""
+    try:
+        _user32.OpenClipboard(None)
+        _user32.EmptyClipboard()
+        data = (text + '\0').encode('utf-16-le')
+        handle = _kernel32.GlobalAlloc(_GMEM_MOVABLE, len(data))
+        ptr = _kernel32.GlobalLock(handle)
+        if ptr:
+            ctypes.memmove(ptr, data, len(data))
+            _kernel32.GlobalUnlock(handle)
+        _user32.SetClipboardData(_CF_UNICODETEXT, handle)
+    except Exception as e:
+        log.debug("设置剪贴板失败: %s", e)
+    finally:
+        try:
+            _user32.CloseClipboard()
+        except Exception:
+            pass
+
+
+def _get_clipboard_text() -> str:
+    """读取剪贴板文本（失败返回空字符串）"""
+    try:
+        _user32.OpenClipboard(None)
+        handle = _user32.GetClipboardData(_CF_UNICODETEXT)
+        if not handle:
+            return ''
+        ptr = _kernel32.GlobalLock(handle)
+        if not ptr:
+            return ''
+        try:
+            chars = []
+            offset = 0
+            while True:
+                addr = ptr if isinstance(ptr, int) else ptr.value
+                char = ctypes.c_wchar.from_address(addr + offset)
+                if char.value == '\0':
+                    break
+                chars.append(char.value)
+                offset += 2
+            return ''.join(chars)
+        finally:
+            _kernel32.GlobalUnlock(handle)
+    except Exception as e:
+        log.debug("读取剪贴板失败: %s", e)
+        return ''
+    finally:
+        try:
+            _user32.CloseClipboard()
+        except Exception:
+            pass
+
+# CF_UNICODETEXT 格式常量
+_CF_UNICODETEXT = 13
+
+
+class _SafeForeground:
+    """上下文管理器：确保微信窗口在前台期间执行操作
+
+    进入时可靠地将微信窗口带到前台（AttachThreadInput），
+    退出时恢复之前的前台窗口。
+    """
+    def __init__(self, hwnd: int):
+        self.hwnd = hwnd
+        self.prev_hwnd = 0
+        self.target_tid = 0
+        self.current_tid = 0
+        self.attached = False
+
+    def __enter__(self):
+        self.prev_hwnd = _user32.GetForegroundWindow()
+        self.target_tid = _get_window_thread_id(self.hwnd)
+        self.current_tid = _user32.GetCurrentThreadId()
+
+        # 最小化则恢复
+        if _user32.IsIconic(self.hwnd):
+            _user32.ShowWindow(self.hwnd, 9)
+            time.sleep(0.2)
+
+        # AttachThreadInput 突破前台权限限制
+        if self.target_tid and self.target_tid != self.current_tid:
+            _user32.AttachThreadInput(self.current_tid, self.target_tid, True)
+            self.attached = True
+
+        # 多次尝试带到前台
+        for _ in range(3):
+            _user32.SetForegroundWindow(self.hwnd)
+            time.sleep(0.15)
+            if _user32.GetForegroundWindow() == self.hwnd:
+                break
+
+        return self
+
+    def __exit__(self, *args):
+        # 分离输入线程
+        if self.attached:
+            _user32.AttachThreadInput(self.current_tid, self.target_tid, False)
+        # 恢复之前的前台窗口
+        if self.prev_hwnd and self.prev_hwnd != self.hwnd and _user32.IsWindow(self.prev_hwnd):
+            _user32.SetForegroundWindow(self.prev_hwnd)
 
 
 def _find_window_handle() -> Optional[int]:
@@ -32,27 +159,45 @@ def _find_window_handle() -> Optional[int]:
     return None
 
 
+def _get_window_thread_id(hwnd: int) -> int:
+    """获取窗口所属的线程 ID"""
+    pid = ctypes.wintypes.DWORD()
+    tid = _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return tid
+
+
 def _restore_and_foreground(hwnd: int) -> bool:
-    """恢复并前台显示窗口，返回是否成功"""
+    """恢复并前台显示窗口（使用 AttachThreadInput 绕过 Windows 前台权限限制），返回是否成功"""
     # 检查窗口是否最小化
     is_iconic = _user32.IsIconic(hwnd)
     if is_iconic:
         _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
         time.sleep(0.2)
 
-    # 带到前台
-    _user32.SetForegroundWindow(hwnd)
-    time.sleep(0.3)
+    # AttachThreadInput：将调用线程附加到目标窗口的输入线程，
+    # 这样 SetForegroundWindow 就能跨进程生效
+    target_tid = _get_window_thread_id(hwnd)
+    current_tid = _user32.GetCurrentThreadId()
+    attached = False
+    if target_tid and target_tid != current_tid:
+        _user32.AttachThreadInput(current_tid, target_tid, True)
+        attached = True
 
-    # 验证
-    foreground = _user32.GetForegroundWindow()
-    if foreground != hwnd:
-        # 重试一次
-        _user32.ShowWindow(hwnd, 5)  # SW_SHOW
+    # 多次尝试带到前台
+    for attempt in range(3):
         _user32.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
+        time.sleep(0.2)
+        if _user32.GetForegroundWindow() == hwnd:
+            break
 
-    return _user32.GetForegroundWindow() == hwnd
+    # 分离输入线程
+    if attached:
+        _user32.AttachThreadInput(current_tid, target_tid, False)
+
+    result = _user32.GetForegroundWindow() == hwnd
+    if not result:
+        log.warning("无法将微信窗口带到前台（尝试 3 次）")
+    return result
 
 
 def _minimize_window(hwnd: int):
@@ -95,64 +240,65 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
         log.warning("找不到微信窗口（标题='%s'）", _WECHAT_WINDOW_TITLE)
         return False
 
-    # 记录当前前台窗口
-    prev_hwnd = _user32.GetForegroundWindow()
-    is_same_window = (prev_hwnd == hwnd)
+    # 保存当前剪贴板内容，后续恢复
+    saved_clipboard = _get_clipboard_text()
+    # 将要发送的消息写入剪贴板（用 Ctrl+V 粘贴比 SendKeys 打字更可靠）
+    _set_clipboard_text(text)
 
-    # ---- Step 1: 恢复 + 前台 ----
-    log.info("Step 1: 恢复微信窗口到前台")
-    if not _restore_and_foreground(hwnd):
-        log.warning("无法将微信窗口带到前台")
-        # 仍然尝试继续 — 键盘输入可能仍有效
-    time.sleep(0.3)
+    try:
+        # 使用 SafeForeground 确保微信窗口在前台
+        with _SafeForeground(hwnd) as ctx:
+            if _user32.GetForegroundWindow() != hwnd:
+                log.warning("微信窗口未成功前台，键盘输入可能打到其他窗口")
+                return False
 
-    # ---- Step 2: 聚焦搜索框 ----
-    log.info("Step 2: 聚焦搜索框")
-    # Ctrl+F 将焦点定位到微信搜索框（确保不在聊天输入框里输入）
-    auto.SendKeys('{Ctrl}f', waitTime=0.2)
-    time.sleep(0.3)
+            # ---- Step 1: 聚焦搜索框 ----
+            log.info("Step 1: Ctrl+F 聚焦搜索框")
+            auto.SendKeys('{Ctrl}f', waitTime=0.2)
+            time.sleep(0.3)
 
-    # ---- Step 3: 输入联系人名 ----
-    log.info("Step 3: 搜索联系人 '%s'", chat_name)
-    # 全选 + Delete 清空搜索框
-    auto.SendKeys('{Ctrl}a', waitTime=0.1)
-    auto.SendKeys('{Delete}', waitTime=0.1)
-    # 输入联系人名
-    auto.SendKeys(chat_name, waitTime=0.3)
-    # 等待搜索结果加载
-    time.sleep(0.8)
+            # ---- Step 2: 输入联系人名 ----
+            log.info("Step 2: 搜索联系人 '%s'", chat_name)
+            auto.SendKeys('{Ctrl}a', waitTime=0.1)
+            auto.SendKeys('{Delete}', waitTime=0.1)
+            auto.SendKeys(chat_name, waitTime=0.3)
+            time.sleep(0.8)
 
-    # ---- Step 4: 打开聊天 ----
-    log.info("Step 4: 打开聊天窗口")
-    auto.SendKeys('{Enter}', waitTime=0.5)
-    # 等待聊天窗口加载
-    time.sleep(0.5)
+            # ---- Step 3: 打开聊天 ----
+            log.info("Step 3: Enter 打开聊天窗口")
+            auto.SendKeys('{Enter}', waitTime=0.5)
+            time.sleep(0.5)
 
-    # ---- Step 5: 输入消息 ----
-    log.info("Step 5: 输入消息")
-    # 全选 + Delete 清空输入框（防止残留内容）
-    auto.SendKeys('{Ctrl}a', waitTime=0.1)
-    auto.SendKeys('{Delete}', waitTime=0.1)
-    # 输入消息
-    auto.SendKeys(text, waitTime=0.2)
-    time.sleep(0.2)
+            # ---- Step 4: 粘贴消息 ----
+            log.info("Step 4: Ctrl+V 粘贴消息")
+            auto.SendKeys('{Ctrl}a', waitTime=0.1)
+            auto.SendKeys('{Delete}', waitTime=0.1)
+            auto.SendKeys('{Ctrl}v', waitTime=0.2)
+            time.sleep(0.3)
 
-    # ---- Step 6: 发送 ----
-    log.info("Step 6: 发送消息")
-    auto.SendKeys('{Enter}', waitTime=0.3)
-    # 等待发送完成
-    time.sleep(0.3)
-    log.info("Step 6: 消息已发送")
+            # ---- Step 5: 发送 ----
+            log.info("Step 5: Enter 发送")
+            auto.SendKeys('{Enter}', waitTime=0.3)
+            time.sleep(0.3)
+            log.info("消息已发送")
 
-    # ---- Step 6: 最小化（可选） ----
-    if minimize:
-        _minimize_window(hwnd)
+        # 最小化
+        if minimize:
+            _minimize_window(hwnd)
 
-    # 恢复之前的前台窗口（仅当不是同一个窗口时）
-    if not is_same_window:
-        _restore_previous_focus(prev_hwnd)
-
-    return True
+        return True
+    finally:
+        # 恢复剪贴板
+        try:
+            time.sleep(0.1)
+            if saved_clipboard:
+                _set_clipboard_text(saved_clipboard)
+            else:
+                _user32.OpenClipboard(None)
+                _user32.EmptyClipboard()
+                _user32.CloseClipboard()
+        except Exception as e:
+            log.debug("剪贴板恢复失败: %s", e)
 
 
 def send_batch(tasks: list, message: Optional[str] = None) -> List[Tuple[str, bool]]:
