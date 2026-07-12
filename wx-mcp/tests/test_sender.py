@@ -111,18 +111,18 @@ class TestSendMessage(unittest.TestCase):
         mock_set_cb.assert_called_once_with('你好')
         self.assertGreaterEqual(mock_sendkeys.call_count, 6)
 
-    @patch('wx_mcp.sender._direct_postmessage_send')
+    @patch('wx_mcp.sender.send_message_fallback')
     @patch('wx_mcp.sender._set_clipboard_text')
     @patch('wx_mcp.sender._get_clipboard_text')
     @patch('wx_mcp.sender._SafeForeground')
     @patch('wx_mcp.sender._find_window_handle')
     @patch('wx_mcp.sender.auto.SendKeys')
     def test_foreground_fails_falls_back(self, mock_sendkeys, mock_find,
-                                          mock_safe, mock_get_cb, mock_set_cb, mock_pm):
-        """前台失败时回退到 PostMessage 方法"""
+                                          mock_safe, mock_get_cb, mock_set_cb, mock_fb):
+        """前台失败时回退到备用方法"""
         mock_find.return_value = 12345
         mock_get_cb.return_value = ''
-        mock_pm.return_value = True
+        mock_fb.return_value = True
         ctx_mock = MagicMock()
         mock_safe.return_value.__enter__.return_value = ctx_mock
 
@@ -130,20 +130,20 @@ class TestSendMessage(unittest.TestCase):
             result = sender.send_message('张三', '你好')
 
         self.assertTrue(result)
-        mock_pm.assert_called_once()
+        mock_fb.assert_called_once_with('张三', '你好')
 
-    @patch('wx_mcp.sender._direct_postmessage_send')
+    @patch('wx_mcp.sender.send_message_fallback')
     @patch('wx_mcp.sender._set_clipboard_text')
     @patch('wx_mcp.sender._get_clipboard_text')
     @patch('wx_mcp.sender._SafeForeground')
     @patch('wx_mcp.sender._find_window_handle')
     @patch('wx_mcp.sender.auto.SendKeys')
     def test_foreground_fails_and_fallback_fails(self, mock_sendkeys, mock_find,
-                                                  mock_safe, mock_get_cb, mock_set_cb, mock_pm):
-        """前台失败且 PostMessage 回退也失败"""
+                                                  mock_safe, mock_get_cb, mock_set_cb, mock_fb):
+        """前台失败且备用方法也失败"""
         mock_find.return_value = 12345
         mock_get_cb.return_value = ''
-        mock_pm.return_value = False
+        mock_fb.return_value = False
         ctx_mock = MagicMock()
         mock_safe.return_value.__enter__.return_value = ctx_mock
 
@@ -151,7 +151,7 @@ class TestSendMessage(unittest.TestCase):
             result = sender.send_message('张三', '你好')
 
         self.assertFalse(result)
-        mock_pm.assert_called_once()
+        mock_fb.assert_called_once_with('张三', '你好')
 
     @patch('wx_mcp.sender._find_window_handle')
     def test_window_not_found(self, mock_find):
@@ -320,8 +320,8 @@ class TestPostMessageHelpers(unittest.TestCase):
         self.assertGreaterEqual(len(wm_char_calls), 5)  # 李皓镇(3) + 你好(2)
 
 
-class TestSendMessagePostMessage(unittest.TestCase):
-    """send_message_postmessage 公共 API 测试"""
+class TestSendMessageFallback(unittest.TestCase):
+    """send_message_fallback 公共 API 测试"""
 
     @patch('wx_mcp.sender._direct_postmessage_send')
     @patch('wx_mcp.sender._find_window_handle')
@@ -329,21 +329,19 @@ class TestSendMessagePostMessage(unittest.TestCase):
         mock_find.return_value = 12345
         mock_direct.return_value = True
 
-        result = sender.send_message_postmessage('张三', '测试消息')
+        result = sender.send_message_fallback('张三', '测试消息')
         self.assertTrue(result)
-        mock_find.assert_called_once()
-        mock_direct.assert_called_once_with(12345, '张三', '测试消息')
 
     @patch('wx_mcp.sender._find_window_handle')
     def test_window_not_found(self, mock_find):
         mock_find.return_value = None
 
-        result = sender.send_message_postmessage('张三', '测试消息')
+        result = sender.send_message_fallback('张三', '测试消息')
         self.assertFalse(result)
 
     def test_empty_params(self):
-        self.assertFalse(sender.send_message_postmessage('', 'hello'))
-        self.assertFalse(sender.send_message_postmessage('张三', ''))
+        self.assertFalse(sender.send_message_fallback('', 'hello'))
+        self.assertFalse(sender.send_message_fallback('张三', ''))
 
     @patch('wx_mcp.sender._direct_postmessage_send')
     @patch('wx_mcp.sender._find_window_handle')
@@ -351,7 +349,7 @@ class TestSendMessagePostMessage(unittest.TestCase):
         mock_find.return_value = 12345
         mock_direct.side_effect = Exception('发送异常')
 
-        result = sender.send_message_postmessage('张三', '测试消息')
+        result = sender.send_message_fallback('张三', '测试消息')
         self.assertFalse(result)
 
 

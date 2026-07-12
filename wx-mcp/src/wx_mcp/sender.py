@@ -287,47 +287,108 @@ def _send_chars(hwnd: int, text: str):
         _user32.SendMessageW(hwnd, _WM_CHAR, code_unit, 1)
 
 
+def _is_weixin_url_registered() -> bool:
+    """检查 weixin:// URL 协议是否已注册"""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "weixin")
+        return True
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _send_via_url_protocol(wxid: str, text: str) -> bool:
+    """
+    通过 weixin://dl/chat URL 协议打开指定联系人的聊天窗口并发送消息。
+
+    weixin:// 协议由 WeChat 安装时在 Windows 注册，
+    调用后 WeChat 会激活对应聊天，可能将窗口带到前台。
+    """
+    import subprocess
+    log.info("尝试 URL 协议: weixin://dl/chat?%s", wxid)
+    url = f'weixin://dl/chat?{wxid}'
+    try:
+        subprocess.Popen(
+            ['cmd', '/c', 'start', url],
+            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except Exception as e:
+        log.warning("URL 协议调用失败: %s", e)
+        return False
+
+    time.sleep(1.2)
+
+    # 尝试用 SwitchToThisWindow + SendInput 发送
+    hwnd = _find_window_handle()
+    if not hwnd:
+        return False
+
+    saved = _get_clipboard_text()
+    _set_clipboard_text(text)
+
+    try:
+        with _SafeForeground(hwnd):
+            if _user32.GetForegroundWindow() == hwnd:
+                log.info("URL 协议后微信已前台，SendInput 发送")
+                auto.SendKeys('{Ctrl}v', waitTime=0.3)
+                time.sleep(0.3)
+                auto.SendKeys('{Enter}', waitTime=0.3)
+                return True
+            else:
+                log.info("URL 协议未前台，SendMessage 发送")
+                _send_chars(hwnd, text)
+                time.sleep(0.3)
+                _send_key_down(hwnd, _VK_RETURN)
+                _send_key_up(hwnd, _VK_RETURN)
+                return True
+    finally:
+        time.sleep(0.1)
+        if saved:
+            _set_clipboard_text(saved)
+        else:
+            _user32.OpenClipboard(None)
+            _user32.EmptyClipboard()
+            _user32.CloseClipboard()
+
+
 def _direct_postmessage_send(hwnd: int, chat_name: str, text: str) -> bool:
     """
     基于 SendMessage 的键盘输入方法（同步处理，不依赖前台）。
 
     关键发现：
-      - WM_CHAR 中文在后台窗口正常工作 ✅（联系人名已验证）
-      - Ctrl/F/V 等组合快捷键在窗口未激活时被 Qt 忽略 ❌
-      - 焦点如果在聊天输入框，直接输文字会当消息发出去
+      - WM_CHAR 中文在后台窗口正常工作 ✅
+      - Ctrl 组合键在后台窗口被 Qt 忽略 ❌
+      - Enterprise 键 (Enter) 在后台窗口会发送当前输入框内容
 
     策略：
-      1. Escape → 让焦点脱离聊天输入框，回退到默认焦点（搜索框）
-      2. 如不行，连发 Tab 把焦点"转"到搜索框
-      3. WM_CHAR 输联系人名 → Enter 打开聊天
-      4. WM_CHAR 输消息内容 → Enter 发送
+      1. 用 WM_NEXTDLGCTL 尝试让 Qt 切换到搜索框
+      2. SendMessage WM_CHAR 输联系人名 → Enter
+      3. SendMessage WM_CHAR 输消息 → Enter 发送
 
     Args:
         hwnd: 微信主窗口句柄
         chat_name: 联系人名称
         text: 消息内容
     """
-    # 将窗口提到 Z 序顶部
     _user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                          0x0002 | 0x0001 | 0x0020)
     time.sleep(0.1)
 
+    _WM_NEXTDLGCTL = 0x0028
+
     # ---- 第一步：尝试让焦点进入搜索框 ----
-    # a) Escape → 可能让当前输入框失去焦点
+    # Escape × 2 → 尝试解除输入框焦点
     _send_key_down(hwnd, _VK_ESCAPE)
     _send_key_up(hwnd, _VK_ESCAPE)
-    time.sleep(0.2)
-
-    # b) 再按 Escape 一次，确保退出任何选中状态
+    time.sleep(0.15)
     _send_key_down(hwnd, _VK_ESCAPE)
     _send_key_up(hwnd, _VK_ESCAPE)
-    time.sleep(0.2)
+    time.sleep(0.15)
 
-    # c) Tab 连按尝试将焦点移到默认控件（搜索框通常是第一个 Tab 停靠点）
-    for _ in range(4):
-        _send_key_down(hwnd, _VK_TAB)
-        _send_key_up(hwnd, _VK_TAB)
-        time.sleep(0.15)
+    # WM_NEXTDLGCTL → 强制切换到下一个控件（可能不受 Qt 激活状态限制）
+    for _ in range(6):
+        _user32.SendMessageW(hwnd, _WM_NEXTDLGCTL, 1, 0)
+        time.sleep(0.12)
 
     # ---- 第二步：输入联系人名 ----
     _send_chars(hwnd, chat_name)
@@ -352,28 +413,58 @@ def _direct_postmessage_send(hwnd: int, chat_name: str, text: str) -> bool:
     return True
 
 
-def send_message_postmessage(chat_name: str, text: str) -> bool:
+def _get_contact_wxid(chat_name: str) -> Optional[str]:
+    """从联系人数据库查询 chat_name 对应的 wxid"""
+    try:
+        from wx_mcp.reader import WeChatReader
+        # 尝试从解密后的数据库获取 reader
+        try:
+            from wx_mcp.server import get_reader, _state
+            reader = get_reader()
+        except Exception:
+            return None
+        contacts = reader.get_contacts(keyword=chat_name, limit=1)
+        if contacts:
+            return contacts[0].get('username', '') or None
+    except Exception as e:
+        log.debug("获取 wxid 失败: %s", e)
+    return None
+
+
+def send_message_fallback(chat_name: str, text: str) -> bool:
     """
-    备用发送方法：通过 PostMessage 发送（不需要窗口前台）
+    多备用发送方法（当 SwitchToThisWindow 失败时）：
+      1. weixin://dl/chat URL 协议
+      2. SendMessage 直接键盘事件
 
     Args:
-        chat_name: 联系人名称、备注或 wxid
+        chat_name: 联系人名称
         text: 消息内容
     """
     if not chat_name or not text:
-        log.warning("send_message_postmessage 收到空参数")
+        log.warning("send_message_fallback 收到空参数")
         return False
 
+    # Fallback 1: weixin:// URL 协议
+    wxid = _get_contact_wxid(chat_name)
+    if wxid and _is_weixin_url_registered():
+        log.info("Fallback 1: 尝试 weixin:// URL 协议")
+        ok = _send_via_url_protocol(wxid, text)
+        if ok:
+            return True
+
+    # Fallback 2: SendMessage 键盘事件
     hwnd = _find_window_handle()
-    if not hwnd:
-        log.warning("找不到微信窗口")
-        return False
+    if hwnd:
+        log.info("Fallback 2: 尝试 SendMessage 键盘事件")
+        try:
+            ok = _direct_postmessage_send(hwnd, chat_name, text)
+            if ok:
+                return True
+        except Exception as e:
+            log.warning("SendMessage 失败: %s", e)
 
-    try:
-        return _direct_postmessage_send(hwnd, chat_name, text)
-    except Exception as e:
-        log.error("PostMessage 发送失败: %s", e, exc_info=True)
-        return False
+    return False
 
 
 def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
@@ -464,17 +555,14 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
                 _minimize_window(hwnd)
             return True
         else:
-            # ---- 方法 B: SwitchToThisWindow 被 UIPI 阻止，改用 PostMessage ----
-            log.info("方法B: SwitchToThisWindow 被拦截，改用 PostMessage")
-            # 不恢复剪贴板（由 _direct_postmessage_send 内使用）
-            # 重新设置剪贴板（之前的可能在 foreground check 中被覆盖）
-            _set_clipboard_text(text)
-            pm_ok = _direct_postmessage_send(hwnd, chat_name, text)
-            if pm_ok:
-                log.info("PostMessage 发送成功")
+            # ---- 方法 B: SwitchToThisWindow 被 UIPI 阻止，改用备用方法 ----
+            log.info("方法B: SwitchToThisWindow 被拦截，改用备用方法")
+            fb_ok = send_message_fallback(chat_name, text)
+            if fb_ok:
+                log.info("备用方法发送成功")
                 return True
             else:
-                log.warning("PostMessage 也失败")
+                log.warning("所有备用方法均失败")
                 return False
     finally:
         # 恢复剪贴板
