@@ -413,6 +413,64 @@ def send_wechat_message(contact: str, message: str) -> str:
 
 
 @mcp.tool()
+def wechat_debug_send(contact: str = "文件传输助手") -> str:
+    """
+    诊断发送功能：逐步测试发送链路的每个环节
+
+    Args:
+        contact: 要测试的联系人（默认文件传输助手）
+    """
+    import ctypes
+    import wx_mcp.sender as snd
+
+    lines = ["微信发送诊断报告:", ""]
+
+    # 1. 查找窗口
+    hwnd = snd._find_window_handle()
+    lines.append(f"1. FindWindowW('微信') → 句柄: {hwnd}")
+    if hwnd:
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+        lines.append(f"   窗口标题: {buf.value}")
+        lines.append(f"   最小化: {bool(ctypes.windll.user32.IsIconic(hwnd))}")
+        lines.append(f"   可见: {bool(ctypes.windll.user32.IsWindowVisible(hwnd))}")
+    else:
+        lines.append("   ❌ 找不到微信窗口")
+        return "\n".join(lines)
+
+    # 2. 当前前台窗口
+    fg = ctypes.windll.user32.GetForegroundWindow()
+    buf2 = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetWindowTextW(fg, buf2, 256)
+    lines.append(f"2. 当前前台窗口: {fg} ({buf2.value})")
+
+    # 3. SwitchToThisWindow
+    user32 = ctypes.windll.user32
+    try:
+        user32.SwitchToThisWindow(hwnd, 1)
+        import time
+        time.sleep(0.3)
+        fg2 = user32.GetForegroundWindow()
+        buf3 = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(fg2, buf3, 256)
+        lines.append(f"3. SwitchToThisWindow 后前台: {fg2} ({buf3.value})")
+        lines.append(f"   是否微信: {'✅' if fg2 == hwnd else '❌ 不是微信'}")
+    except Exception as e:
+        lines.append(f"3. SwitchToThisWindow 异常: {e}")
+
+    # 4. 尝试发送
+    lines.append("")
+    lines.append("4. 尝试调用 send_message...")
+    try:
+        ok = snd.send_message(contact, "诊断测试消息", minimize=False)
+        lines.append(f"   send_message 返回: {'✅ True' if ok else '❌ False'}")
+    except Exception as e:
+        lines.append(f"   send_message 异常: {e}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def batch_send_messages(contacts: list, message: str) -> str:
     """
     批量发送微信消息给多个联系人
