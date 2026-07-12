@@ -306,14 +306,18 @@ class TestPostMessageHelpers(unittest.TestCase):
 
     @patch('wx_mcp.sender._user32.SendMessageW')
     @patch('wx_mcp.sender._user32.SetWindowPos')
-    @patch('wx_mcp.sender._user32.PostMessageW')
-    def test_direct_postmessage_send(self, mock_post, mock_swp, mock_send):
+    def test_direct_postmessage_send(self, mock_swp, mock_send):
         result = sender._direct_postmessage_send(12345, '李皓镇', '你好')
         self.assertTrue(result)
-        # Should have posted many key messages
-        self.assertGreater(mock_post.call_count, 10)
-        # Should have sent WM_ACTIVATE
-        mock_send.assert_any_call(12345, 0x0006, 1, 0)  # WM_ACTIVATE, WA_ACTIVE
+        mock_swp.assert_called_once()
+        # SendMessageW 应该被多次调用（Escape×2 + Tab×4 + 联系人 + Enter + 消息 + Enter）
+        self.assertGreater(mock_send.call_count, 15)
+        # 应包含 WM_CHAR 调用
+        wm_char_calls = [
+            c for c in mock_send.call_args_list
+            if c[0][1] == 0x0102
+        ]
+        self.assertGreaterEqual(len(wm_char_calls), 5)  # 李皓镇(3) + 你好(2)
 
 
 class TestSendMessagePostMessage(unittest.TestCase):

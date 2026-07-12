@@ -231,6 +231,8 @@ _VK_V = 0x56
 _VK_A = 0x41
 _VK_DELETE = 0x2E
 _VK_BACK = 0x08
+_VK_ESCAPE = 0x1B
+_VK_TAB = 0x09
 
 # User32 PostMessage/SendMessage for fallback
 _user32.PostMessageW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.UINT, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
@@ -266,57 +268,86 @@ def _post_ctrl_combo(hwnd: int, vk: int):
     _post_key_up(hwnd, _VK_CONTROL)
 
 
+def _send_key_down(hwnd: int, vk: int):
+    """向窗口发送 WM_KEYDOWN（同步，确保 Qt 立即处理）"""
+    _user32.SendMessageW(hwnd, _WM_KEYDOWN, vk, 1)
+
+
+def _send_key_up(hwnd: int, vk: int):
+    """向窗口发送 WM_KEYUP（同步）"""
+    lparam = (1 << 31) | (1 << 30) | 1
+    _user32.SendMessageW(hwnd, _WM_KEYUP, vk, lparam)
+
+
+def _send_chars(hwnd: int, text: str):
+    """向窗口发送一串字符（WM_CHAR，同步），支持 UTF-16 代理对"""
+    encoded = text.encode('utf-16-le')
+    for i in range(0, len(encoded), 2):
+        code_unit = int.from_bytes(encoded[i:i+2], 'little')
+        _user32.SendMessageW(hwnd, _WM_CHAR, code_unit, 1)
+
+
 def _direct_postmessage_send(hwnd: int, chat_name: str, text: str) -> bool:
     """
-    完全基于 PostMessage 的发送方法。
-    不要求窗口在前台 — 直接向窗口消息队列投递键盘事件。
+    基于 SendMessage 的键盘输入方法（同步处理，不依赖前台）。
 
-    原理：
-      1. 用 SetWindowPos 将窗口提到 Z 序顶部
-      2. 用 SendMessage WM_ACTIVATE / WM_SETFOCUS 让 Qt 认为窗口已激活
-      3. PostMessage WM_KEYDOWN/UP/CHAR 模拟键盘操作
+    关键发现：
+      - WM_CHAR 中文在后台窗口正常工作 ✅（联系人名已验证）
+      - Ctrl/F/V 等组合快捷键在窗口未激活时被 Qt 忽略 ❌
+      - 焦点如果在聊天输入框，直接输文字会当消息发出去
 
-    注意：
-      - 依赖 Qt 处理 Posted 消息，WeChat 4.x 基于 Qt 理论上支持
-      - 若 WeChat 需要前台激活才处理输入，此方法可能失效
+    策略：
+      1. Escape → 让焦点脱离聊天输入框，回退到默认焦点（搜索框）
+      2. 如不行，连发 Tab 把焦点"转"到搜索框
+      3. WM_CHAR 输联系人名 → Enter 打开聊天
+      4. WM_CHAR 输消息内容 → Enter 发送
 
     Args:
         hwnd: 微信主窗口句柄
         chat_name: 联系人名称
         text: 消息内容
     """
-    # 将窗口提到 Z 序顶部（帮助 Qt 处理激活状态）
+    # 将窗口提到 Z 序顶部
     _user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
-                         0x0002 | 0x0001 | 0x0020)  # SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+                         0x0002 | 0x0001 | 0x0020)
     time.sleep(0.1)
 
-    # 让 Qt 认为窗口已激活（否则可能忽略键盘事件）
-    _user32.SendMessageW(hwnd, _WM_ACTIVATE, _WA_ACTIVE, 0)
-    _user32.SendMessageW(hwnd, _WM_SETFOCUS, 0, 0)
-    time.sleep(0.15)
+    # ---- 第一步：尝试让焦点进入搜索框 ----
+    # a) Escape → 可能让当前输入框失去焦点
+    _send_key_down(hwnd, _VK_ESCAPE)
+    _send_key_up(hwnd, _VK_ESCAPE)
+    time.sleep(0.2)
 
-    # 1) Ctrl+F → 聚焦搜索框（WM_CHAR 经过验证可用）
-    _post_ctrl_combo(hwnd, _VK_F)
-    time.sleep(0.3)
+    # b) 再按 Escape 一次，确保退出任何选中状态
+    _send_key_down(hwnd, _VK_ESCAPE)
+    _send_key_up(hwnd, _VK_ESCAPE)
+    time.sleep(0.2)
 
-    # 2) 输入联系人名（WM_CHAR 的中文已验证可用）
-    _post_chars(hwnd, chat_name)
+    # c) Tab 连按尝试将焦点移到默认控件（搜索框通常是第一个 Tab 停靠点）
+    for _ in range(4):
+        _send_key_down(hwnd, _VK_TAB)
+        _send_key_up(hwnd, _VK_TAB)
+        time.sleep(0.15)
+
+    # ---- 第二步：输入联系人名 ----
+    _send_chars(hwnd, chat_name)
+    time.sleep(0.8)
+
+    # ---- 第三步：Enter 打开聊天 ----
+    _send_key_down(hwnd, _VK_RETURN)
+    _send_key_up(hwnd, _VK_RETURN)
     time.sleep(0.6)
 
-    # 3) Enter → 打开聊天
-    _post_key_down(hwnd, _VK_RETURN)
-    _post_key_up(hwnd, _VK_RETURN)
-    time.sleep(0.5)
+    # ---- 第四步：输入消息内容 ----
+    _send_chars(hwnd, text)
+    time.sleep(0.6)
 
-    # 4) 直接发送消息内容（不用 Ctrl+V — 后台窗口的 Qt 不处理 Ctrl 组合快捷键）
-    #    改用 WM_CHAR 逐字输入，已验证 WM_CHAR 中文在后台窗口也能正常处理 ✅
-    _post_chars(hwnd, text)
-    time.sleep(0.5)
+    # ---- 第五步：Enter 发送 ----
+    _send_key_down(hwnd, _VK_RETURN)
+    _send_key_up(hwnd, _VK_RETURN)
+    time.sleep(0.4)
 
-    # 5) Enter → 发送
-    _post_key_down(hwnd, _VK_RETURN)
-    _post_key_up(hwnd, _VK_RETURN)
-    time.sleep(0.3)
+    return True
 
     return True
 
