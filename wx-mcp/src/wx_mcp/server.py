@@ -364,16 +364,49 @@ def send_wechat_message(contact: str, message: str) -> str:
     """
     发送微信消息给指定联系人
 
+    自动尝试用 备注名 → 昵称 → wxid 依次尝试发送。
+    建议优先使用备注名或昵称，发送成功率更高。
+
     Args:
-        contact: 联系人昵称、备注名
+        contact: 联系人昵称、备注名 或 wxid
         message: 消息内容
     """
     try:
         ok = send_message(contact, message, minimize=True)
         if ok:
             return f"✅ 已发送给 {contact}: {message[:50]}"
-        else:
-            return f"❌ 发送失败: 未找到微信窗口或联系人 {contact}"
+
+        # 如果直接发送失败，尝试从联系人列表解析其他标识符
+        log.info("直接发送失败，尝试从联系人列表解析 '%s'...", contact)
+        try:
+            reader = get_reader()
+            contacts = reader.get_contacts(keyword=contact, limit=5)
+            candidates = []
+            for c in contacts:
+                c_name = c.get('remark') or c.get('nick_name') or ''
+                c_wxid = c.get('username', '')
+                if c_name and c_name != contact:
+                    candidates.append(c_name)
+                if c_wxid and c_wxid != contact:
+                    candidates.append(c_wxid)
+
+            # 去重
+            seen = set()
+            unique_candidates = []
+            for c in candidates:
+                if c not in seen:
+                    seen.add(c)
+                    unique_candidates.append(c)
+
+            for alias in unique_candidates:
+                log.info("尝试用 '%s' 发送...", alias)
+                ok = send_message(alias, message, minimize=True)
+                if ok:
+                    return f"✅ 已发送给 {contact} (via {alias}): {message[:50]}"
+        except Exception as e2:
+            log.debug("联系人解析失败（非致命）: %s", e2)
+
+        return f"❌ 发送失败: 未找到微信窗口或联系人 '{contact}'\n\n提示：请确保微信窗口已打开，联系人 '{contact}' 在你的通讯录中。如果联系人是通过 wxid 查找的，请尝试用备注名或昵称发送。"
     except Exception as e:
         log.error("send_wechat_message 失败: %s", e, exc_info=True)
         return f"❌ 发送失败: {e}"

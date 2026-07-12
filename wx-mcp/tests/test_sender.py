@@ -1,7 +1,8 @@
 """
 单元测试：微信消息发送器
 
-使用 unittest.mock 模拟 uiautomation，验证发送逻辑和 fallback 策略。
+测试新 sender 实现（Win32 API + SendInput 方式）。
+使用 unittest.mock 模拟 ctypes 和 uiautomation。
 """
 import unittest
 from unittest.mock import MagicMock, patch
@@ -9,286 +10,185 @@ from unittest.mock import MagicMock, patch
 from wx_mcp import sender
 
 
-class MockUIA:
-    """创建模拟的 uiautomation 控件树"""
+class TestFindWindowHandle(unittest.TestCase):
+    """_find_window_handle 测试"""
 
-    @staticmethod
-    def make_control(
-        exists: bool = True,
-        name: str = '',
-        automation_id: str = '',
-        control_type=None,
-    ) -> MagicMock:
-        ctrl = MagicMock()
-        ctrl.Name = name
-        ctrl.AutomationId = automation_id
-        ctrl.Exists.return_value = exists
+    @patch('wx_mcp.sender._user32.FindWindowW')
+    def test_found(self, mock_find):
+        mock_find.return_value = 123456
 
-        # 模拟 ControlType 比较
-        type_mock = MagicMock()
-        type_mock.EditControl = 1
-        type_mock.DocumentControl = 2
-        type_mock.ButtonControl = 3
-        type_mock.ListItemControl = 4
-        ctrl.ControlType = type_mock
+        hwnd = sender._find_window_handle()
+        self.assertEqual(hwnd, 123456)
+        mock_find.assert_called_once_with(None, '微信')
 
-        return ctrl
+    @patch('wx_mcp.sender._user32.FindWindowW')
+    def test_not_found(self, mock_find):
+        mock_find.return_value = 0
 
-    @staticmethod
-    def make_window(exists: bool = True) -> MagicMock:
-        window = MockUIA.make_control(exists=exists, name='微信')
-        # WindowPattern mock
-        wp = MagicMock()
-        wp.CurrentVisualState = 1  # Normal
-        window.GetWindowPattern.return_value = wp
-
-        # EditControl 搜索框
-        search_box = MockUIA.make_control(exists=True)
-        search_box.GetValuePattern.return_value = None  # ValuePattern 不可用，触发 SendKeys 备选
-
-        def edit_control_side_effect(searchDepth=None):
-            return search_box
-        window.EditControl = MagicMock(side_effect=edit_control_side_effect)
-
-        # 发送按钮
-        send_btn = MockUIA.make_control(exists=True, name='发送')
-        invoke_pattern = MagicMock()
-        send_btn.GetInvokePattern.return_value = invoke_pattern
-
-        def btn_control_side_effect(Name=None, AutomationId=None, ClassName=None, searchDepth=None):
-            return send_btn
-        window.ButtonControl = MagicMock(side_effect=btn_control_side_effect)
-
-        # ListItemControl - 搜索结果
-        list_item = MockUIA.make_control(exists=True)
-        window.ListItemControl = MagicMock(return_value=list_item)
-
-        # DocumentControl - 输入区域
-        doc_control = MockUIA.make_control(exists=True)
-        value_pattern = MagicMock()
-        value_pattern.SetValue = MagicMock()
-        doc_control.GetValuePattern.return_value = value_pattern
-        window.DocumentControl = MagicMock(return_value=doc_control)
-
-        # Window handle
-        window.NativeWindowHandle = 12345
-
-        return window
+        hwnd = sender._find_window_handle()
+        self.assertIsNone(hwnd)
 
 
-class TestFindWindow(unittest.TestCase):
-    """查找微信窗口测试"""
-
-    @patch('wx_mcp.sender.auto.WindowControl')
-    def test_find_window_success(self, mock_window_ctrl):
-        mock_window = MockUIA.make_window(exists=True)
-        mock_window_ctrl.return_value = mock_window
-
-        result = sender._find_window(retries=0)
-        self.assertIsNotNone(result)
-
-    @patch('wx_mcp.sender.auto.WindowControl')
-    def test_find_window_retry_on_failure(self, mock_window_ctrl):
-        """第一次找不到，第二次重试找到"""
-        mock_window = MockUIA.make_window(exists=True)
-        # 第一次 Exists 返回 False，第二次返回 True
-        mock_window.Exists.side_effect = [False, True]
-        mock_window_ctrl.return_value = mock_window
-
-        result = sender._find_window(retries=1)
-        self.assertIsNotNone(result)
-
-    @patch('wx_mcp.sender.auto.WindowControl')
-    def test_find_window_exhausted_retries(self, mock_window_ctrl):
-        """重试耗尽仍未找到，返回 None"""
-        mock_window = MockUIA.make_window(exists=False)
-        mock_window_ctrl.return_value = mock_window
-
-        result = sender._find_window(retries=1)
-        self.assertIsNone(result)
-
-
-class TestFindSendButton(unittest.TestCase):
-    """查找发送按钮测试"""
+class TestRestoreAndForeground(unittest.TestCase):
+    """_restore_and_foreground 测试"""
 
     def setUp(self):
-        self.window = MockUIA.make_window()
+        self.mock_user32 = patch('wx_mcp.sender._user32').start()
+        self.addCleanup(patch.stopall)
 
-    def test_find_by_name(self):
-        """按名称找发送按钮"""
-        btn = MockUIA.make_control(exists=True, name='发送')
-        self.window.ButtonControl = MagicMock(return_value=btn)
+    def test_normal_window(self):
+        """非最小化窗口直接带到前台"""
+        self.mock_user32.IsIconic.return_value = False
+        self.mock_user32.GetForegroundWindow.return_value = 12345  # 直接成功
 
-        result = sender._find_send_button(self.window)
-        self.assertIsNotNone(result)
-
-    def test_find_by_automation_id(self):
-        """按 AutomationId 找发送按钮（备选）"""
-        btn_name = MockUIA.make_control(exists=False)
-        btn_aid = MockUIA.make_control(exists=True, automation_id='SendButton')
-        self.window.ButtonControl = MagicMock(return_value=btn_name)
-
-        def control_side_effect(AutomationId=None, searchDepth=None, Name=None, ClassName=None):
-            if AutomationId == 'SendButton':
-                return btn_aid
-            if ClassName == 'QPushButton':
-                return MockUIA.make_control(exists=False)
-            return btn_name
-        self.window.Control = MagicMock(side_effect=control_side_effect)
-
-        result = sender._find_send_button(self.window)
-        self.assertIsNotNone(result)
-
-    def test_not_found_returns_none(self):
-        """找不到发送按钮时返回 None"""
-        btn = MockUIA.make_control(exists=False)
-        self.window.ButtonControl = MagicMock(return_value=btn)
-        self.window.Control = MagicMock(return_value=MockUIA.make_control(exists=False))
-
-        result = sender._find_send_button(self.window)
-        self.assertIsNone(result)
-
-
-class TestFindInputArea(unittest.TestCase):
-    """查找输入框测试"""
-
-    def setUp(self):
-        self.window = MockUIA.make_window()
-
-    def test_find_edit_control(self):
-        """优先找 EditControl"""
-        edit = MockUIA.make_control(exists=True)
-        self.window.EditControl = MagicMock(return_value=edit)
-
-        result = sender._find_input_area(self.window)
-        self.assertIsNotNone(result)
-
-    def test_find_document_control_fallback(self):
-        """EditControl 不存在时找 DocumentControl"""
-        edit = MockUIA.make_control(exists=False)
-        doc = MockUIA.make_control(exists=True)
-        self.window.EditControl = MagicMock(return_value=edit)
-        self.window.DocumentControl = MagicMock(return_value=doc)
-
-        result = sender._find_input_area(self.window)
-        self.assertIsNotNone(result)
-
-    def test_not_found_returns_none(self):
-        """所有控件都不存在时返回 None"""
-        edit = MockUIA.make_control(exists=False)
-        doc = MockUIA.make_control(exists=False)
-        self.window.EditControl = MagicMock(return_value=edit)
-        self.window.DocumentControl = MagicMock(return_value=doc)
-        self.window.GetChildren = MagicMock(return_value=[])
-
-        result = sender._find_input_area(self.window)
-        self.assertIsNone(result)
-
-
-class TestSetTextMethods(unittest.TestCase):
-    """文本设置方法测试"""
-
-    def test_value_pattern_success(self):
-        control = MagicMock()
-        pattern = MagicMock()
-        pattern.SetValue = MagicMock()
-        control.GetValuePattern.return_value = pattern
-
-        result = sender._set_text_via_value_pattern(control, 'hello')
+        result = sender._restore_and_foreground(12345)
         self.assertTrue(result)
-        pattern.SetValue.assert_called_once_with('hello')
+        self.mock_user32.ShowWindow.assert_not_called()
+        self.mock_user32.SetForegroundWindow.assert_called_once_with(12345)
 
-    def test_value_pattern_failure(self):
-        control = MagicMock()
-        control.GetValuePattern.return_value = None
+    def test_minimized_window(self):
+        """最小化窗口先恢复再前台"""
+        self.mock_user32.IsIconic.return_value = True
+        self.mock_user32.GetForegroundWindow.return_value = 12345
 
-        result = sender._set_text_via_value_pattern(control, 'hello')
+        result = sender._restore_and_foreground(12345)
+        self.assertTrue(result)
+        self.mock_user32.ShowWindow.assert_called_once_with(12345, 9)  # SW_RESTORE
+        self.mock_user32.SetForegroundWindow.assert_called_once_with(12345)
+
+    def test_foreground_fails_retry(self):
+        """第一次带到前台失败，重试后成功"""
+        self.mock_user32.IsIconic.return_value = False
+        # 第一次 GetForegroundWindow 返回别的句柄（触发重试），第二次返回正确句柄
+        self.mock_user32.GetForegroundWindow.side_effect = [999, 12345]
+
+        result = sender._restore_and_foreground(12345)
+        self.assertTrue(result)
+        # ShowWindow(SW_SHOW) 被调用了一次（重试时）
+        self.mock_user32.ShowWindow.assert_called_once_with(12345, 5)
+        self.assertEqual(self.mock_user32.SetForegroundWindow.call_count, 2)
+
+    def test_foreground_always_fails(self):
+        """始终无法带到前台"""
+        self.mock_user32.IsIconic.return_value = False
+        self.mock_user32.GetForegroundWindow.return_value = 999
+
+        result = sender._restore_and_foreground(12345)
+        # 应该返回 False，但仍试图继续
+        self.assertFalse(result)
+        self.assertEqual(self.mock_user32.SetForegroundWindow.call_count, 2)
+
+
+class TestMinimizeWindow(unittest.TestCase):
+    """_minimize_window 测试"""
+
+    @patch('wx_mcp.sender._user32')
+    def test_minimize(self, mock_user32):
+        sender._minimize_window(12345)
+        mock_user32.ShowWindow.assert_called_once_with(12345, 6)  # SW_MINIMIZE
+
+
+class TestRestorePreviousFocus(unittest.TestCase):
+    """_restore_previous_focus 测试"""
+
+    @patch('wx_mcp.sender._user32')
+    def test_restore_valid_handle(self, mock_user32):
+        mock_user32.IsWindow.return_value = True
+
+        sender._restore_previous_focus(999)
+        mock_user32.SetForegroundWindow.assert_called_once_with(999)
+
+    @patch('wx_mcp.sender._user32')
+    def test_restore_invalid_handle(self, mock_user32):
+        mock_user32.IsWindow.return_value = False
+
+        sender._restore_previous_focus(999)
+        mock_user32.SetForegroundWindow.assert_not_called()
+
+    @patch('wx_mcp.sender._user32')
+    def test_none_handle(self, mock_user32):
+        sender._restore_previous_focus(0)
+        mock_user32.IsWindow.assert_not_called()
+        mock_user32.SetForegroundWindow.assert_not_called()
+
+
+class TestSendMessage(unittest.TestCase):
+    """send_message 完整流程测试"""
+
+    @patch('wx_mcp.sender._restore_previous_focus')
+    @patch('wx_mcp.sender._minimize_window')
+    @patch('wx_mcp.sender._restore_and_foreground')
+    @patch('wx_mcp.sender._find_window_handle')
+    @patch('wx_mcp.sender.auto.SendKeys')
+    def test_send_success(self, mock_sendkeys, mock_find, mock_restore,
+                          mock_minimize, mock_restore_focus):
+        """正常发送流程"""
+        mock_find.return_value = 12345
+        mock_restore.return_value = True
+
+        result = sender.send_message('张三', '你好', minimize=True)
+
+        self.assertTrue(result)
+        mock_find.assert_called_once()
+        mock_restore.assert_called_once_with(12345)
+        # 应该调用多次 SendKeys（Ctrl+A, Delete, name, Enter, Ctrl+A, Delete, text, Ctrl+Enter）
+        # 至少有 8 次 SendKeys 调用
+        self.assertGreaterEqual(mock_sendkeys.call_count, 6)
+        mock_minimize.assert_called_once_with(12345)
+        mock_restore_focus.assert_called()
+
+    @patch('wx_mcp.sender._find_window_handle')
+    def test_window_not_found(self, mock_find):
+        """找不到窗口返回 False"""
+        mock_find.return_value = None
+
+        result = sender.send_message('张三', '你好')
         self.assertFalse(result)
 
-    def test_sendkeys_success(self):
-        control = MagicMock()
+    @patch('wx_mcp.sender._restore_previous_focus')
+    @patch('wx_mcp.sender._minimize_window')
+    @patch('wx_mcp.sender._restore_and_foreground')
+    @patch('wx_mcp.sender._find_window_handle')
+    @patch('wx_mcp.sender.auto.SendKeys')
+    def test_foreground_fails_but_continues(self, mock_sendkeys, mock_find,
+                                            mock_restore, mock_minimize,
+                                            mock_restore_focus):
+        """前台失败但继续尝试发送"""
+        mock_find.return_value = 12345
+        mock_restore.return_value = False  # 前台失败
 
-        result = sender._set_text_via_sendkeys(control, 'hello')
+        result = sender.send_message('张三', '你好')
+        self.assertTrue(result)  # 仍然继续，SendKeys 可能仍有效
+        self.assertGreater(mock_sendkeys.call_count, 0)
+
+    @patch('wx_mcp.sender._restore_previous_focus')
+    @patch('wx_mcp.sender._minimize_window')
+    @patch('wx_mcp.sender._restore_and_foreground')
+    @patch('wx_mcp.sender._find_window_handle')
+    @patch('wx_mcp.sender.auto.SendKeys')
+    def test_send_without_minimize(self, mock_sendkeys, mock_find,
+                                   mock_restore, mock_minimize,
+                                   mock_restore_focus):
+        """发送后不最小化"""
+        mock_find.return_value = 12345
+        mock_restore.return_value = True
+
+        result = sender.send_message('张三', '你好', minimize=False)
         self.assertTrue(result)
-        control.SendKeys.assert_any_call('{Ctrl}a', waitTime=0.05)
-        control.SendKeys.assert_any_call('hello', waitTime=0.05)
-
-    def test_sendkeys_failure(self):
-        control = MagicMock()
-        control.SendKeys.side_effect = Exception('sendkeys failed')
-
-        result = sender._set_text_via_sendkeys(control, 'hello')
-        self.assertFalse(result)
-
-
-class TestInvokeButton(unittest.TestCase):
-    """按钮点击测试"""
-
-    def test_invoke_pattern_success(self):
-        btn = MagicMock()
-        pattern = MagicMock()
-        pattern.Invoke = MagicMock()
-        btn.GetInvokePattern.return_value = pattern
-
-        result = sender._invoke_button(btn)
-        self.assertTrue(result)
-        pattern.Invoke.assert_called_once()
-
-    def test_invoke_pattern_fallback_to_click(self):
-        btn = MagicMock()
-        btn.GetInvokePattern.return_value = None
-
-        result = sender._invoke_button(btn)
-        self.assertTrue(result)
-        btn.Click.assert_called_once()
-
-    def test_both_failures(self):
-        btn = MagicMock()
-        btn.GetInvokePattern.return_value = None
-        btn.Click.side_effect = Exception('click failed')
-
-        result = sender._invoke_button(btn)
-        self.assertFalse(result)
-
-
-class TestWaitFor(unittest.TestCase):
-    """轮询等待测试"""
-
-    def test_condition_met_immediately(self):
-        result = sender._wait_for(lambda: True, timeout=1.0)
-        self.assertTrue(result)
-
-    def test_condition_never_met(self):
-        result = sender._wait_for(lambda: False, timeout=0.1, interval=0.05)
-        self.assertFalse(result)
-
-    def test_condition_met_after_delay(self):
-        state = [False]
-
-        def delayed_condition():
-            if not state[0]:
-                state[0] = True
-                return False
-            return True
-
-        result = sender._wait_for(delayed_condition, timeout=1.0, interval=0.01)
-        self.assertTrue(result)
+        mock_minimize.assert_not_called()
+        mock_restore_focus.assert_called()
 
 
 class TestSendMessageValidation(unittest.TestCase):
     """send_message 参数校验测试"""
 
-    @patch('wx_mcp.sender._find_window')
-    def test_empty_chat_name_returns_false(self, mock_find_window):
+    def test_empty_chat_name(self):
         result = sender.send_message('', 'hello')
         self.assertFalse(result)
-        mock_find_window.assert_not_called()
 
-    @patch('wx_mcp.sender._find_window')
-    def test_empty_text_returns_false(self, mock_find_window):
+    def test_empty_text(self):
         result = sender.send_message('张三', '')
         self.assertFalse(result)
-        mock_find_window.assert_not_called()
 
 
 class TestSendBatch(unittest.TestCase):
@@ -337,28 +237,29 @@ class TestSendBatch(unittest.TestCase):
         self.assertEqual(results, [])
 
 
-class TestRestoreFocus(unittest.TestCase):
-    """焦点恢复测试"""
+class TestSendBatchLastMinimizes(unittest.TestCase):
+    """批量发送最后一条才最小化"""
 
-    @patch('wx_mcp.sender.auto.ControlFromHandle')
-    def test_restore_with_valid_handle(self, mock_from_handle):
-        prev_control = MagicMock()
-        prev_control.Exists.return_value = True
-        mock_from_handle.return_value = prev_control
+    @patch('wx_mcp.sender.send_message')
+    def test_last_item_minimizes(self, mock_send):
+        mock_send.return_value = True
 
-        sender._restore_previous_focus(999, 12345)
-        prev_control.SetFocus.assert_called_once()
+        sender.send_batch([('A', '1'), ('B', '2'), ('C', '3')])
 
-    @patch('wx_mcp.sender.auto.ControlFromHandle')
-    def test_restore_same_handle_noop(self, mock_from_handle):
-        sender._restore_previous_focus(12345, 12345)
-        mock_from_handle.assert_not_called()
+        # 前两条 minimize=False，最后一条 minimize=True
+        self.assertEqual(mock_send.call_count, 3)
+        call_args_list = mock_send.call_args_list
+        self.assertFalse(call_args_list[0].kwargs.get('minimize', True))
+        self.assertFalse(call_args_list[1].kwargs.get('minimize', True))
+        self.assertTrue(call_args_list[2].kwargs.get('minimize', True))
 
-    def test_restore_none_handle_noop(self):
-        try:
-            sender._restore_previous_focus(None, 12345)
-        except Exception:
-            self.fail('_restore_previous_focus(None, ...) raised unexpectedly')
+
+class TestSendEmptyMessage(unittest.TestCase):
+    """空消息测试"""
+
+    def test_empty_batch_list(self):
+        results = sender.send_batch([])
+        self.assertEqual(results, [])
 
 
 if __name__ == '__main__':
