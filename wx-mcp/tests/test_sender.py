@@ -307,11 +307,9 @@ class TestPostMessageHelpers(unittest.TestCase):
     @patch('wx_mcp.sender._user32.SendMessageW')
     @patch('wx_mcp.sender._user32.SetWindowPos')
     @patch('wx_mcp.sender._user32.PostMessageW')
-    @patch('wx_mcp.sender._set_clipboard_text')
-    def test_direct_postmessage_send(self, mock_set_cb, mock_post, mock_swp, mock_send):
+    def test_direct_postmessage_send(self, mock_post, mock_swp, mock_send):
         result = sender._direct_postmessage_send(12345, '李皓镇', '你好')
         self.assertTrue(result)
-        mock_set_cb.assert_called_once_with('你好')
         # Should have posted many key messages
         self.assertGreater(mock_post.call_count, 10)
         # Should have sent WM_ACTIVATE

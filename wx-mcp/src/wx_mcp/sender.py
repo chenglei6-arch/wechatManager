@@ -295,14 +295,11 @@ def _direct_postmessage_send(hwnd: int, chat_name: str, text: str) -> bool:
     _user32.SendMessageW(hwnd, _WM_SETFOCUS, 0, 0)
     time.sleep(0.15)
 
-    # 设置剪贴板内容（用于 Ctrl+V 粘贴）
-    _set_clipboard_text(text)
-
-    # 1) Ctrl+F → 聚焦搜索框
+    # 1) Ctrl+F → 聚焦搜索框（WM_CHAR 经过验证可用）
     _post_ctrl_combo(hwnd, _VK_F)
     time.sleep(0.3)
 
-    # 2) 输入联系人名
+    # 2) 输入联系人名（WM_CHAR 的中文已验证可用）
     _post_chars(hwnd, chat_name)
     time.sleep(0.6)
 
@@ -311,20 +308,12 @@ def _direct_postmessage_send(hwnd: int, chat_name: str, text: str) -> bool:
     _post_key_up(hwnd, _VK_RETURN)
     time.sleep(0.5)
 
-    # 4) Ctrl+A → 全选
-    _post_ctrl_combo(hwnd, _VK_A)
-    time.sleep(0.1)
+    # 4) 直接发送消息内容（不用 Ctrl+V — 后台窗口的 Qt 不处理 Ctrl 组合快捷键）
+    #    改用 WM_CHAR 逐字输入，已验证 WM_CHAR 中文在后台窗口也能正常处理 ✅
+    _post_chars(hwnd, text)
+    time.sleep(0.5)
 
-    # 5) Delete → 删除已有内容
-    _post_key_down(hwnd, _VK_DELETE)
-    _post_key_up(hwnd, _VK_DELETE)
-    time.sleep(0.1)
-
-    # 6) Ctrl+V → 粘贴消息
-    _post_ctrl_combo(hwnd, _VK_V)
-    time.sleep(0.3)
-
-    # 7) Enter → 发送
+    # 5) Enter → 发送
     _post_key_down(hwnd, _VK_RETURN)
     _post_key_up(hwnd, _VK_RETURN)
     time.sleep(0.3)
