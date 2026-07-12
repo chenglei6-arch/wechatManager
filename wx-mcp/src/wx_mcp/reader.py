@@ -104,7 +104,7 @@ class WeChatReader:
             raise
 
     def get_sessions(self, limit: int = 20) -> List[Dict]:
-        """获取最近会话列表"""
+        """获取最近会话列表（含显示名称，从 contact 表解析）"""
         conn = self._get_db('session/session.db')
         try:
             rows = conn.execute("""
@@ -114,11 +114,35 @@ class WeChatReader:
                 ORDER BY sort_timestamp DESC LIMIT ?
             """, (limit,)).fetchall()
             result = []
-            for r in rows:
-                d = dict(r)
-                if d.get('last_timestamp'):
-                    d['time'] = timestamp_to_iso(d['last_timestamp'])
-                result.append(d)
+            # 尝试从 contact 表解析会话显示名
+            try:
+                contact_conn = self._get_db('contact/contact.db')
+                name_map = {}
+                for r in rows:
+                    username = r['username']
+                    if username not in name_map:
+                        crow = contact_conn.execute(
+                            "SELECT nick_name, remark FROM contact WHERE username=?",
+                            (username,)
+                        ).fetchone()
+                        if crow:
+                            name_map[username] = crow['remark'] or crow['nick_name'] or username
+                        else:
+                            name_map[username] = username
+                for r in rows:
+                    d = dict(r)
+                    d['display_name'] = name_map.get(r['username'], r['username'])
+                    if d.get('last_timestamp'):
+                        d['time'] = timestamp_to_iso(d['last_timestamp'])
+                    result.append(d)
+            except Exception:
+                # fallback: contact 表不可用时直接用 username
+                for r in rows:
+                    d = dict(r)
+                    d['display_name'] = r['username']
+                    if d.get('last_timestamp'):
+                        d['time'] = timestamp_to_iso(d['last_timestamp'])
+                    result.append(d)
             return result
         except Exception as e:
             log.error(f"get_sessions 查询失败: {e}", exc_info=True)

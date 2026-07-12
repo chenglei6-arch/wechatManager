@@ -69,8 +69,8 @@ class TestGetRecentSessions(unittest.TestCase):
     def test_sessions_success(self, mock_get_reader):
         mock_reader = MagicMock()
         mock_reader.get_sessions.return_value = [
-            {'strNickName': '张三', 'strContent': '你好'},
-            {'strNickName': '李四', 'strContent': '收到'},
+            {'display_name': '张三', 'summary': '你好', 'username': 'wxid_aaa', 'unread_count': 0},
+            {'display_name': '李四', 'summary': '收到', 'username': 'wxid_bbb', 'unread_count': 0},
         ]
         mock_get_reader.return_value = mock_reader
 

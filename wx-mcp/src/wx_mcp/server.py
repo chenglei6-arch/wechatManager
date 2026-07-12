@@ -293,11 +293,20 @@ def get_recent_sessions(limit: int = 20) -> str:
             return "未找到会话"
         lines = [f"最近会话 ({len(sessions)}):", ""]
         for s in sessions:
-            name = s.get('strNickName', '')
-            content = s.get('strContent', '') or ''
+            name = s.get('display_name', s.get('username', ''))
+            unread = s.get('unread_count', 0)
+            summary = s.get('summary', '') or ''
+            last_time = s.get('time', '')
+            type_label = "👥 群聊" if '@chatroom' in s.get('username', '') else "👤 私聊"
             lines.append(f"  {name}")
-            if content:
-                lines.append(f"    {str(content)[:60]}")
+            info = []
+            if unread:
+                info.append(f"未读:{unread}")
+            if last_time:
+                info.append(last_time)
+            lines.append(f"    {type_label} {' | '.join(info)}")
+            if summary:
+                lines.append(f"    {str(summary)[:80]}")
         return "\n".join(lines)
     except Exception as e:
         log.error("get_recent_sessions 失败: %s", e, exc_info=True)
@@ -318,23 +327,30 @@ def read_messages(talker: str, limit: int = 30) -> str:
         contacts = reader.get_contacts(keyword=talker, limit=5)
         if contacts and talker != contacts[0].get('username', ''):
             talker_id = contacts[0].get('username', talker)
+            display_name = contacts[0].get('remark') or contacts[0].get('nick_name') or talker
         else:
             talker_id = talker
+            display_name = talker
 
         msgs = reader.get_messages(talker_id, limit=limit)
         if not msgs:
-            return f"未找到与 {talker} 的聊天记录"
+            return f"未找到与 {display_name} 的聊天记录"
 
-        lines = [f"与 {talker} 的聊天记录 ({len(msgs)}):", ""]
+        lines = [f"与 {display_name} 的聊天记录 ({len(msgs)}):", ""]
         for m in reversed(msgs):
             msg_type = m.get('type', 0)
             content = str(m.get('content', '')) or ''
             msg_time = m.get('time', '')
+            sender = m.get('real_sender_id', '') or ''
 
             t = _MSG_TYPE_LABELS.get(msg_type, f'type{msg_type}')
 
             if msg_type == 1:
-                lines.append(f"  [{msg_time}] {content[:200]}")
+                entry = f"  [{msg_time}]"
+                if sender:
+                    entry += f" {sender}:"
+                entry += f" {content[:200]}"
+                lines.append(entry)
             else:
                 lines.append(f"  [{msg_time}] [{t}] {content[:100]}")
         return "\n".join(lines)
