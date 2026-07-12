@@ -29,6 +29,8 @@ _user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTE
 _user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
 _user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
 _user32.OpenClipboard.argtypes = [ctypes.wintypes.HWND]
+_user32.SetFocus.argtypes = [ctypes.wintypes.HWND]
+_user32.SetFocus.restype = ctypes.wintypes.HWND
 _user32.CloseClipboard.restype = ctypes.wintypes.BOOL
 _user32.EmptyClipboard.restype = ctypes.wintypes.BOOL
 _user32.SetClipboardData.restype = ctypes.wintypes.HANDLE
@@ -111,19 +113,18 @@ _CF_UNICODETEXT = 13
 class _SafeForeground:
     """上下文管理器：确保微信窗口在前台期间执行操作
 
-    进入时可靠地将微信窗口带到前台（AttachThreadInput），
-    退出时恢复之前的前台窗口。
+    进入时将微信窗口带到前台（AttachThreadInput 到**当前前台窗口的线程**
+    以突破 SetForegroundWindow 权限限制），退出时恢复之前的前台窗口。
     """
     def __init__(self, hwnd: int):
         self.hwnd = hwnd
         self.prev_hwnd = 0
-        self.target_tid = 0
+        self.foreground_tid = 0
         self.current_tid = 0
         self.attached = False
 
     def __enter__(self):
         self.prev_hwnd = _user32.GetForegroundWindow()
-        self.target_tid = _get_window_thread_id(self.hwnd)
         self.current_tid = _kernel32.GetCurrentThreadId()
 
         # 最小化则恢复
@@ -131,9 +132,12 @@ class _SafeForeground:
             _user32.ShowWindow(self.hwnd, 9)
             time.sleep(0.2)
 
-        # AttachThreadInput 突破前台权限限制
-        if self.target_tid and self.target_tid != self.current_tid:
-            _user32.AttachThreadInput(self.current_tid, self.target_tid, True)
+        # AttachThreadInput 到当前前台窗口的线程（不是目标窗口！）
+        # 这样 SetForegroundWindow 认为调用线程属于前台输入状态，允许切换
+        if self.prev_hwnd:
+            self.foreground_tid = _get_window_thread_id(self.prev_hwnd)
+        if self.foreground_tid and self.foreground_tid != self.current_tid:
+            _user32.AttachThreadInput(self.current_tid, self.foreground_tid, True)
             self.attached = True
 
         # 多次尝试带到前台
@@ -143,12 +147,16 @@ class _SafeForeground:
             if _user32.GetForegroundWindow() == self.hwnd:
                 break
 
+        # 也设置焦点到目标窗口（现在有权限了）
+        if _user32.GetForegroundWindow() == self.hwnd:
+            _user32.SetFocus(self.hwnd)
+
         return self
 
     def __exit__(self, *args):
         # 分离输入线程
         if self.attached:
-            _user32.AttachThreadInput(self.current_tid, self.target_tid, False)
+            _user32.AttachThreadInput(self.current_tid, self.foreground_tid, False)
         # 恢复之前的前台窗口
         if self.prev_hwnd and self.prev_hwnd != self.hwnd and _user32.IsWindow(self.prev_hwnd):
             _user32.SetForegroundWindow(self.prev_hwnd)
@@ -163,7 +171,9 @@ def _find_window_handle() -> Optional[int]:
 
 
 def _get_window_thread_id(hwnd: int) -> int:
-    """获取窗口所属的线程 ID"""
+    """获取窗口所属的线程 ID，无效句柄返回 0"""
+    if not hwnd:
+        return 0
     pid = ctypes.wintypes.DWORD()
     tid = _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     return tid
