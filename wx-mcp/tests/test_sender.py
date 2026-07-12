@@ -111,22 +111,47 @@ class TestSendMessage(unittest.TestCase):
         mock_set_cb.assert_called_once_with('你好')
         self.assertGreaterEqual(mock_sendkeys.call_count, 6)
 
+    @patch('wx_mcp.sender._direct_postmessage_send')
     @patch('wx_mcp.sender._set_clipboard_text')
     @patch('wx_mcp.sender._get_clipboard_text')
     @patch('wx_mcp.sender._SafeForeground')
     @patch('wx_mcp.sender._find_window_handle')
     @patch('wx_mcp.sender.auto.SendKeys')
-    def test_foreground_fails_returns_false(self, *mocks):
-        """前台失败则返回 False"""
-        mock_find = mocks[3]
+    def test_foreground_fails_falls_back(self, mock_sendkeys, mock_find,
+                                          mock_safe, mock_get_cb, mock_set_cb, mock_pm):
+        """前台失败时回退到 PostMessage 方法"""
         mock_find.return_value = 12345
+        mock_get_cb.return_value = ''
+        mock_pm.return_value = True
         ctx_mock = MagicMock()
-        mocks[2].return_value.__enter__.return_value = ctx_mock
+        mock_safe.return_value.__enter__.return_value = ctx_mock
+
+        with patch('wx_mcp.sender._user32.GetForegroundWindow', return_value=999):
+            result = sender.send_message('张三', '你好')
+
+        self.assertTrue(result)
+        mock_pm.assert_called_once()
+
+    @patch('wx_mcp.sender._direct_postmessage_send')
+    @patch('wx_mcp.sender._set_clipboard_text')
+    @patch('wx_mcp.sender._get_clipboard_text')
+    @patch('wx_mcp.sender._SafeForeground')
+    @patch('wx_mcp.sender._find_window_handle')
+    @patch('wx_mcp.sender.auto.SendKeys')
+    def test_foreground_fails_and_fallback_fails(self, mock_sendkeys, mock_find,
+                                                  mock_safe, mock_get_cb, mock_set_cb, mock_pm):
+        """前台失败且 PostMessage 回退也失败"""
+        mock_find.return_value = 12345
+        mock_get_cb.return_value = ''
+        mock_pm.return_value = False
+        ctx_mock = MagicMock()
+        mock_safe.return_value.__enter__.return_value = ctx_mock
 
         with patch('wx_mcp.sender._user32.GetForegroundWindow', return_value=999):
             result = sender.send_message('张三', '你好')
 
         self.assertFalse(result)
+        mock_pm.assert_called_once()
 
     @patch('wx_mcp.sender._find_window_handle')
     def test_window_not_found(self, mock_find):
@@ -237,6 +262,95 @@ class TestSendEmptyMessage(unittest.TestCase):
     def test_empty_batch_list(self):
         results = sender.send_batch([])
         self.assertEqual(results, [])
+
+
+class TestPostMessageHelpers(unittest.TestCase):
+    """PostMessage 辅助函数测试"""
+
+    @patch('wx_mcp.sender._user32.PostMessageW')
+    def test_post_key_down(self, mock_post):
+        sender._post_key_down(12345, 0x11)  # VK_CONTROL
+        mock_post.assert_called_once_with(12345, 0x0100, 0x11, 1)
+
+    @patch('wx_mcp.sender._user32.PostMessageW')
+    def test_post_key_up(self, mock_post):
+        sender._post_key_up(12345, 0x0D)  # VK_RETURN
+        mock_post.assert_called_once()
+        args = mock_post.call_args
+        self.assertEqual(args[0][0], 12345)
+        self.assertEqual(args[0][1], 0x0101)  # WM_KEYUP
+        self.assertEqual(args[0][2], 0x0D)
+        # lparam should have bits 30 and 31 set
+
+    @patch('wx_mcp.sender._user32.PostMessageW')
+    def test_post_chars(self, mock_post):
+        sender._post_chars(12345, '你好')
+        self.assertEqual(mock_post.call_count, 2)
+        calls = mock_post.call_args_list
+        # '你' = U+4F60
+        self.assertEqual(calls[0][0][1], 0x0102)  # WM_CHAR
+        self.assertEqual(calls[0][0][2], 0x4F60)
+        # '好' = U+597D
+        self.assertEqual(calls[1][0][1], 0x0102)
+        self.assertEqual(calls[1][0][2], 0x597D)
+
+    @patch('wx_mcp.sender._post_key_down')
+    @patch('wx_mcp.sender._post_key_up')
+    def test_post_ctrl_combo(self, mock_up, mock_down):
+        sender._post_ctrl_combo(12345, 0x56)  # VK_V
+        # Ctrl down, V down, V up, Ctrl up
+        self.assertEqual(mock_down.call_count, 2)
+        self.assertEqual(mock_up.call_count, 2)
+        mock_down.assert_any_call(12345, 0x11)  # Ctrl down
+        mock_down.assert_any_call(12345, 0x56)  # V down
+
+    @patch('wx_mcp.sender._user32.SendMessageW')
+    @patch('wx_mcp.sender._user32.SetWindowPos')
+    @patch('wx_mcp.sender._user32.PostMessageW')
+    @patch('wx_mcp.sender._set_clipboard_text')
+    def test_direct_postmessage_send(self, mock_set_cb, mock_post, mock_swp, mock_send):
+        result = sender._direct_postmessage_send(12345, '李皓镇', '你好')
+        self.assertTrue(result)
+        mock_set_cb.assert_called_once_with('你好')
+        # Should have posted many key messages
+        self.assertGreater(mock_post.call_count, 10)
+        # Should have sent WM_ACTIVATE
+        mock_send.assert_any_call(12345, 0x0006, 1, 0)  # WM_ACTIVATE, WA_ACTIVE
+
+
+class TestSendMessagePostMessage(unittest.TestCase):
+    """send_message_postmessage 公共 API 测试"""
+
+    @patch('wx_mcp.sender._direct_postmessage_send')
+    @patch('wx_mcp.sender._find_window_handle')
+    def test_success(self, mock_find, mock_direct):
+        mock_find.return_value = 12345
+        mock_direct.return_value = True
+
+        result = sender.send_message_postmessage('张三', '测试消息')
+        self.assertTrue(result)
+        mock_find.assert_called_once()
+        mock_direct.assert_called_once_with(12345, '张三', '测试消息')
+
+    @patch('wx_mcp.sender._find_window_handle')
+    def test_window_not_found(self, mock_find):
+        mock_find.return_value = None
+
+        result = sender.send_message_postmessage('张三', '测试消息')
+        self.assertFalse(result)
+
+    def test_empty_params(self):
+        self.assertFalse(sender.send_message_postmessage('', 'hello'))
+        self.assertFalse(sender.send_message_postmessage('张三', ''))
+
+    @patch('wx_mcp.sender._direct_postmessage_send')
+    @patch('wx_mcp.sender._find_window_handle')
+    def test_send_failure(self, mock_find, mock_direct):
+        mock_find.return_value = 12345
+        mock_direct.side_effect = Exception('发送异常')
+
+        result = sender.send_message_postmessage('张三', '测试消息')
+        self.assertFalse(result)
 
 
 if __name__ == '__main__':

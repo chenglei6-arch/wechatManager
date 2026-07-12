@@ -210,16 +210,168 @@ def _restore_previous_focus(prev_hwnd: int):
         _user32.SetForegroundWindow(prev_hwnd)
 
 
+# ---- PostMessage 备用发送方法 ----
+# 当 SwitchToThisWindow 因 UIPI 被阻止时，
+# 使用 PostMessage 将键盘事件直接发送到微信窗口的消息队列。
+# 不要求窗口在前台，但依赖 Qt 处理 Posted 消息。
+
+# 窗口消息常量
+_WM_KEYDOWN = 0x0100
+_WM_KEYUP = 0x0101
+_WM_CHAR = 0x0102
+_WM_ACTIVATE = 0x0006
+_WM_SETFOCUS = 0x0007
+_WA_ACTIVE = 1
+
+# 虚拟键码
+_VK_CONTROL = 0x11
+_VK_RETURN = 0x0D
+_VK_F = 0x46
+_VK_V = 0x56
+_VK_A = 0x41
+_VK_DELETE = 0x2E
+_VK_BACK = 0x08
+
+# User32 PostMessage/SendMessage for fallback
+_user32.PostMessageW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.UINT, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+_user32.PostMessageW.restype = ctypes.wintypes.BOOL
+_user32.SendMessageW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.UINT, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+_user32.SendMessageW.restype = ctypes.c_int64
+
+
+def _post_key_down(hwnd: int, vk: int):
+    """向窗口发送 WM_KEYDOWN"""
+    _user32.PostMessageW(hwnd, _WM_KEYDOWN, vk, 1)
+
+
+def _post_key_up(hwnd: int, vk: int):
+    """向窗口发送 WM_KEYUP（prev state=down, transition=up）"""
+    lparam = (1 << 31) | (1 << 30) | 1
+    _user32.PostMessageW(hwnd, _WM_KEYUP, vk, lparam)
+
+
+def _post_chars(hwnd: int, text: str):
+    """向窗口发送一串字符（WM_CHAR），支持 UTF-16 代理对（emoji 等）"""
+    encoded = text.encode('utf-16-le')
+    for i in range(0, len(encoded), 2):
+        code_unit = int.from_bytes(encoded[i:i+2], 'little')
+        _user32.PostMessageW(hwnd, _WM_CHAR, code_unit, 1)
+
+
+def _post_ctrl_combo(hwnd: int, vk: int):
+    """发送 Ctrl+<key> 组合键"""
+    _post_key_down(hwnd, _VK_CONTROL)
+    _post_key_down(hwnd, vk)
+    _post_key_up(hwnd, vk)
+    _post_key_up(hwnd, _VK_CONTROL)
+
+
+def _direct_postmessage_send(hwnd: int, chat_name: str, text: str) -> bool:
+    """
+    完全基于 PostMessage 的发送方法。
+    不要求窗口在前台 — 直接向窗口消息队列投递键盘事件。
+
+    原理：
+      1. 用 SetWindowPos 将窗口提到 Z 序顶部
+      2. 用 SendMessage WM_ACTIVATE / WM_SETFOCUS 让 Qt 认为窗口已激活
+      3. PostMessage WM_KEYDOWN/UP/CHAR 模拟键盘操作
+
+    注意：
+      - 依赖 Qt 处理 Posted 消息，WeChat 4.x 基于 Qt 理论上支持
+      - 若 WeChat 需要前台激活才处理输入，此方法可能失效
+
+    Args:
+        hwnd: 微信主窗口句柄
+        chat_name: 联系人名称
+        text: 消息内容
+    """
+    # 将窗口提到 Z 序顶部（帮助 Qt 处理激活状态）
+    _user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                         0x0002 | 0x0001 | 0x0020)  # SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+    time.sleep(0.1)
+
+    # 让 Qt 认为窗口已激活（否则可能忽略键盘事件）
+    _user32.SendMessageW(hwnd, _WM_ACTIVATE, _WA_ACTIVE, 0)
+    _user32.SendMessageW(hwnd, _WM_SETFOCUS, 0, 0)
+    time.sleep(0.15)
+
+    # 设置剪贴板内容（用于 Ctrl+V 粘贴）
+    _set_clipboard_text(text)
+
+    # 1) Ctrl+F → 聚焦搜索框
+    _post_ctrl_combo(hwnd, _VK_F)
+    time.sleep(0.3)
+
+    # 2) 输入联系人名
+    _post_chars(hwnd, chat_name)
+    time.sleep(0.6)
+
+    # 3) Enter → 打开聊天
+    _post_key_down(hwnd, _VK_RETURN)
+    _post_key_up(hwnd, _VK_RETURN)
+    time.sleep(0.5)
+
+    # 4) Ctrl+A → 全选
+    _post_ctrl_combo(hwnd, _VK_A)
+    time.sleep(0.1)
+
+    # 5) Delete → 删除已有内容
+    _post_key_down(hwnd, _VK_DELETE)
+    _post_key_up(hwnd, _VK_DELETE)
+    time.sleep(0.1)
+
+    # 6) Ctrl+V → 粘贴消息
+    _post_ctrl_combo(hwnd, _VK_V)
+    time.sleep(0.3)
+
+    # 7) Enter → 发送
+    _post_key_down(hwnd, _VK_RETURN)
+    _post_key_up(hwnd, _VK_RETURN)
+    time.sleep(0.3)
+
+    return True
+
+
+def send_message_postmessage(chat_name: str, text: str) -> bool:
+    """
+    备用发送方法：通过 PostMessage 发送（不需要窗口前台）
+
+    Args:
+        chat_name: 联系人名称、备注或 wxid
+        text: 消息内容
+    """
+    if not chat_name or not text:
+        log.warning("send_message_postmessage 收到空参数")
+        return False
+
+    hwnd = _find_window_handle()
+    if not hwnd:
+        log.warning("找不到微信窗口")
+        return False
+
+    try:
+        return _direct_postmessage_send(hwnd, chat_name, text)
+    except Exception as e:
+        log.error("PostMessage 发送失败: %s", e, exc_info=True)
+        return False
+
+
 def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
     """
     发送微信消息
 
-    用 Win32 API 定位微信窗口，用 SendInput 模拟键盘操作：
-      Step 1: 恢复窗口 → 前台
-      Step 2: 输入联系人名（微信搜索框自动聚焦）
-      Step 3: Enter 打开聊天
-      Step 4: 输入消息
-      Step 5: Ctrl+Enter 发送
+    使用两阶段策略：
+      方法 A — 优先通过 SwitchToThisWindow 将微信带到前台，再用 SendInput 模拟键盘操作
+      （适用于微信与 MCP Server 在同一权限级别运行）
+      方法 B — 若 SwitchToThisWindow 被 UIPI 拦截，改用 PostMessage 直接向微信窗口
+      消息队列投递键盘事件（不依赖前台，但依赖 Qt 处理 Posted 消息）
+
+    键盘操作流程：
+      1. Ctrl+F → 聚焦搜索框
+      2. 输入联系人名
+      3. Enter → 打开聊天
+      4. Ctrl+V → 粘贴消息（通过剪贴板）
+      5. Enter → 发送
 
     Args:
         chat_name: 联系人名称、备注或 wxid
@@ -247,45 +399,63 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
     try:
         # 使用 SafeForeground 确保微信窗口在前台
         with _SafeForeground(hwnd) as ctx:
-            if _user32.GetForegroundWindow() != hwnd:
-                log.warning("微信窗口未成功前台，键盘输入可能打到其他窗口")
+            foreground_ok = (_user32.GetForegroundWindow() == hwnd)
+
+        if foreground_ok:
+            # ---- 方法 A: 窗口已前台，使用 SendInput (SendKeys) ----
+            log.info("方法A: 微信窗口已前台，使用 SendKeys")
+            with _SafeForeground(hwnd) as ctx:
+                if _user32.GetForegroundWindow() != hwnd:
+                    log.warning("微信窗口未能保持前台")
+                    return False
+
+                # ---- Step 1: 聚焦搜索框 ----
+                log.info("Step 1: Ctrl+F 聚焦搜索框")
+                auto.SendKeys('{Ctrl}f', waitTime=0.2)
+                time.sleep(0.3)
+
+                # ---- Step 2: 输入联系人名 ----
+                log.info("Step 2: 搜索联系人 '%s'", chat_name)
+                auto.SendKeys('{Ctrl}a', waitTime=0.1)
+                auto.SendKeys('{Delete}', waitTime=0.1)
+                auto.SendKeys(chat_name, waitTime=0.3)
+                time.sleep(0.8)
+
+                # ---- Step 3: 打开聊天 ----
+                log.info("Step 3: Enter 打开聊天窗口")
+                auto.SendKeys('{Enter}', waitTime=0.5)
+                time.sleep(0.5)
+
+                # ---- Step 4: 粘贴消息 ----
+                log.info("Step 4: Ctrl+V 粘贴消息")
+                auto.SendKeys('{Ctrl}a', waitTime=0.1)
+                auto.SendKeys('{Delete}', waitTime=0.1)
+                auto.SendKeys('{Ctrl}v', waitTime=0.2)
+                time.sleep(0.3)
+
+                # ---- Step 5: 发送 ----
+                log.info("Step 5: Enter 发送")
+                auto.SendKeys('{Enter}', waitTime=0.3)
+                time.sleep(0.3)
+                log.info("消息已发送")
+
+            # 最小化
+            if minimize:
+                _minimize_window(hwnd)
+            return True
+        else:
+            # ---- 方法 B: SwitchToThisWindow 被 UIPI 阻止，改用 PostMessage ----
+            log.info("方法B: SwitchToThisWindow 被拦截，改用 PostMessage")
+            # 不恢复剪贴板（由 _direct_postmessage_send 内使用）
+            # 重新设置剪贴板（之前的可能在 foreground check 中被覆盖）
+            _set_clipboard_text(text)
+            pm_ok = _direct_postmessage_send(hwnd, chat_name, text)
+            if pm_ok:
+                log.info("PostMessage 发送成功")
+                return True
+            else:
+                log.warning("PostMessage 也失败")
                 return False
-
-            # ---- Step 1: 聚焦搜索框 ----
-            log.info("Step 1: Ctrl+F 聚焦搜索框")
-            auto.SendKeys('{Ctrl}f', waitTime=0.2)
-            time.sleep(0.3)
-
-            # ---- Step 2: 输入联系人名 ----
-            log.info("Step 2: 搜索联系人 '%s'", chat_name)
-            auto.SendKeys('{Ctrl}a', waitTime=0.1)
-            auto.SendKeys('{Delete}', waitTime=0.1)
-            auto.SendKeys(chat_name, waitTime=0.3)
-            time.sleep(0.8)
-
-            # ---- Step 3: 打开聊天 ----
-            log.info("Step 3: Enter 打开聊天窗口")
-            auto.SendKeys('{Enter}', waitTime=0.5)
-            time.sleep(0.5)
-
-            # ---- Step 4: 粘贴消息 ----
-            log.info("Step 4: Ctrl+V 粘贴消息")
-            auto.SendKeys('{Ctrl}a', waitTime=0.1)
-            auto.SendKeys('{Delete}', waitTime=0.1)
-            auto.SendKeys('{Ctrl}v', waitTime=0.2)
-            time.sleep(0.3)
-
-            # ---- Step 5: 发送 ----
-            log.info("Step 5: Enter 发送")
-            auto.SendKeys('{Enter}', waitTime=0.3)
-            time.sleep(0.3)
-            log.info("消息已发送")
-
-        # 最小化
-        if minimize:
-            _minimize_window(hwnd)
-
-        return True
     finally:
         # 恢复剪贴板
         try:

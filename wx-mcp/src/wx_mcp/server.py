@@ -444,7 +444,51 @@ def wechat_debug_send(contact: str = "文件传输助手") -> str:
     ctypes.windll.user32.GetWindowTextW(fg, buf2, 256)
     lines.append(f"2. 当前前台窗口: {fg} ({buf2.value})")
 
-    # 3. SwitchToThisWindow
+    # 3. 检查权限/完整性级别
+    try:
+        import ctypes
+        # 打开当前进程和微信进程的令牌检查完整性级别
+        PROCESS_QUERY_INFORMATION = 0x0400
+        TOKEN_QUERY = 0x0008
+        kernel32 = ctypes.windll.kernel32
+        advapi32 = ctypes.windll.advapi32
+
+        wechat_pid = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wechat_pid))
+
+        # 微信进程
+        wx_handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, wechat_pid)
+        # 自身进程
+        self_handle = kernel32.GetCurrentProcess()
+
+        def _get_integrity_level(handle):
+            buf = ctypes.create_string_buffer(256)
+            buf_len = ctypes.wintypes.DWORD(256)
+            if advapi32.GetTokenInformation(handle, 25, buf, 256, ctypes.byref(buf_len)):  # TokenIntegrityLevel = 25
+                # Integrity level SID's last sub-authority
+                sid = ctypes.c_char_p(ctypes.addressof(buf) + 8)  # TOKEN_MANDATORY_LABEL
+                sub_auth = ctypes.c_uint32.from_address(ctypes.addressof(buf) + 12)  # simplified offset
+                levels = {0x1000: '低', 0x2000: '中', 0x3000: '高', 0x4000: '系统'}
+                # Try to read the sub-authority count from SID structure
+                sid_addr = ctypes.c_uint32.from_address(ctypes.addressof(buf) + 8).value
+                # The actual integrity level value is in the last sub-authority of the SID
+                # SID structure: Revision(1) + SubAuthorityCount(1) + IdentifierAuthority(6) + SubAuthority[]
+                sid_buf = ctypes.create_string_buffer(256)
+                if ctypes.windll.advapi32.CopySid(256, sid_buf, ctypes.c_void_p(ctypes.addressof(buf) + 8)):
+                    sub_count = ctypes.c_byte.from_address(ctypes.addressof(sid_buf) + 1).value
+                    il_val = ctypes.c_uint32.from_address(ctypes.addressof(sid_buf) + 8 + (sub_count-1)*4).value
+                    return f"0x{il_val:04X} ({levels.get(il_val, '未知')})"
+            return "未知"
+
+        lines.append(f"3a. 当前进程 IL: {_get_integrity_level(self_handle)}")
+        lines.append(f"3b. 微信进程 IL: {_get_integrity_level(wx_handle)}")
+
+        if wx_handle:
+            kernel32.CloseHandle(wx_handle)
+    except Exception as e:
+        lines.append(f"3. 权限检查异常（非关键）: {e}")
+
+    # 4. SwitchToThisWindow
     user32 = ctypes.windll.user32
     try:
         user32.SwitchToThisWindow(hwnd, 1)
@@ -453,19 +497,37 @@ def wechat_debug_send(contact: str = "文件传输助手") -> str:
         fg2 = user32.GetForegroundWindow()
         buf3 = ctypes.create_unicode_buffer(256)
         user32.GetWindowTextW(fg2, buf3, 256)
-        lines.append(f"3. SwitchToThisWindow 后前台: {fg2} ({buf3.value})")
+        lines.append(f"4. SwitchToThisWindow 后前台: {fg2} ({buf3.value})")
         lines.append(f"   是否微信: {'✅' if fg2 == hwnd else '❌ 不是微信'}")
     except Exception as e:
-        lines.append(f"3. SwitchToThisWindow 异常: {e}")
+        lines.append(f"4. SwitchToThisWindow 异常: {e}")
 
-    # 4. 尝试发送
+    # 5. 尝试发送（主方法）
     lines.append("")
-    lines.append("4. 尝试调用 send_message...")
+    lines.append("5. 尝试调用 send_message（主方法）...")
     try:
         ok = snd.send_message(contact, "诊断测试消息", minimize=False)
         lines.append(f"   send_message 返回: {'✅ True' if ok else '❌ False'}")
     except Exception as e:
         lines.append(f"   send_message 异常: {e}")
+
+    # 6. 尝试备用发送方法
+    lines.append("")
+    lines.append("6. 尝试 PostMessage 备用方法...")
+    try:
+        ok = snd.send_message_postmessage(contact, "诊断测试消息")
+        lines.append(f"   send_message_postmessage 返回: {'✅ True' if ok else '❌ False'}")
+    except Exception as e:
+        lines.append(f"   send_message_postmessage 异常: {e}")
+
+    # 7. 直接 SendKeys（即使窗口不在前台，看是否部分生效）
+    lines.append("")
+    lines.append("7. 后台直接 PostMessage 发送...")
+    try:
+        ok = snd._direct_postmessage_send(hwnd, contact, "诊断测试消息")
+        lines.append(f"   _direct_postmessage_send 返回: {'✅ True' if ok else '❌ False'}")
+    except Exception as e:
+        lines.append(f"   _direct_postmessage_send 异常: {e}")
 
     return "\n".join(lines)
 
