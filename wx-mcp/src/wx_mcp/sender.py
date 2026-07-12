@@ -106,9 +106,15 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
         # 仍然尝试继续 — 键盘输入可能仍有效
     time.sleep(0.3)
 
-    # ---- Step 2: 输入联系人名 ----
-    log.info("Step 2: 搜索联系人 '%s'", chat_name)
-    # 先确保搜索框为空（全选 + Delete）
+    # ---- Step 2: 聚焦搜索框 ----
+    log.info("Step 2: 聚焦搜索框")
+    # Ctrl+F 将焦点定位到微信搜索框（确保不在聊天输入框里输入）
+    auto.SendKeys('{Ctrl}f', waitTime=0.2)
+    time.sleep(0.3)
+
+    # ---- Step 3: 输入联系人名 ----
+    log.info("Step 3: 搜索联系人 '%s'", chat_name)
+    # 全选 + Delete 清空搜索框
     auto.SendKeys('{Ctrl}a', waitTime=0.1)
     auto.SendKeys('{Delete}', waitTime=0.1)
     # 输入联系人名
@@ -116,14 +122,14 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
     # 等待搜索结果加载
     time.sleep(0.8)
 
-    # ---- Step 3: 打开聊天 ----
-    log.info("Step 3: 打开聊天窗口")
+    # ---- Step 4: 打开聊天 ----
+    log.info("Step 4: 打开聊天窗口")
     auto.SendKeys('{Enter}', waitTime=0.5)
     # 等待聊天窗口加载
     time.sleep(0.5)
 
-    # ---- Step 4: 输入消息 ----
-    log.info("Step 4: 输入消息")
+    # ---- Step 5: 输入消息 ----
+    log.info("Step 5: 输入消息")
     # 全选 + Delete 清空输入框（防止残留内容）
     auto.SendKeys('{Ctrl}a', waitTime=0.1)
     auto.SendKeys('{Delete}', waitTime=0.1)
@@ -131,13 +137,12 @@ def send_message(chat_name: str, text: str, minimize: bool = True) -> bool:
     auto.SendKeys(text, waitTime=0.2)
     time.sleep(0.2)
 
-    # ---- Step 5: 发送 ----
-    log.info("Step 5: 发送消息")
-    # Ctrl+Enter 或 Enter 发送（WeChat 4.x 两者皆可）
-    auto.SendKeys('{Ctrl}{Enter}', waitTime=0.3)
+    # ---- Step 6: 发送 ----
+    log.info("Step 6: 发送消息")
+    auto.SendKeys('{Enter}', waitTime=0.3)
     # 等待发送完成
     time.sleep(0.3)
-    log.info("Step 5: 消息已发送")
+    log.info("Step 6: 消息已发送")
 
     # ---- Step 6: 最小化（可选） ----
     if minimize:
