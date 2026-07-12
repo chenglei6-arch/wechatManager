@@ -22,6 +22,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -425,6 +426,123 @@ def read_messages(talker: str, limit: int = 30) -> str:
     except Exception as e:
         log.error("read_messages 失败: %s", e, exc_info=True)
         return f"❌ 读取消息失败: {e}"
+
+
+@mcp.tool()
+def wait_for_new_messages(talker: str, timeout_seconds: int = 120) -> str:
+    """
+    等待指定联系人的新消息（阻塞等待，内部 2 秒轮询）。
+
+    此工具会在 MCP 服务端内部以 ~2 秒间隔轮询微信数据库，
+    一旦检测到来自该联系人的新消息立即返回。
+
+    💡 相比「每分钟用 Cron 调度 read_messages」的方式：
+      - 有新消息时秒级响应（~2 秒延迟）
+      - 无消息时不消耗任何 Token 和上下文
+      - 不需要反复调度 Cron
+
+    使用场景：聊天监控循环
+      1. 调用此工具等待新消息
+      2. 收到消息后处理并回复
+      3. 再次调用此工具等待下一条
+
+    Args:
+        talker: 联系人的 wxid 或昵称/备注名
+        timeout_seconds: 超时秒数，默认 120 秒（2 分钟），最大 600 秒（10 分钟）
+    """
+    start = time.time()
+    max_timeout = min(timeout_seconds, 600)
+    poll_interval = 2.0
+
+    # ---- Phase 1: 解析联系人信息 ----
+    try:
+        reader = get_reader()
+        contacts = reader.get_contacts(keyword=talker, limit=5)
+        if contacts and talker != contacts[0].get('username', ''):
+            talker_id = contacts[0].get('username', talker)
+            display_name = contacts[0].get('remark') or contacts[0].get('nick_name') or talker
+        else:
+            talker_id = talker
+            display_name = talker
+    except Exception as e:
+        log.error("wait_for_new_messages: 初始化失败: %s", e, exc_info=True)
+        return f"❌ 初始化失败: {e}"
+
+    # ---- Phase 2: 获取基准状态（当前最新消息的 local_id） ----
+    try:
+        latest = reader.get_messages(talker_id, limit=1)
+        if latest:
+            last_local_id = latest[0].get('local_id', 0)
+        else:
+            last_local_id = 0
+    except Exception as e:
+        log.error("wait_for_new_messages: 获取基准消息失败: %s", e)
+        return f"❌ 读取聊天记录失败: {e}"
+
+    log.info("wait_for_new_messages: 开始监控 '%s' (timeout=%ds, poll=%.1fs, last_local_id=%s)",
+             display_name, max_timeout, poll_interval, last_local_id)
+
+    # ---- Phase 3: 轮询循环 ----
+    while True:
+        elapsed = time.time() - start
+        remaining = max_timeout - elapsed
+        if remaining <= 0:
+            log.info("wait_for_new_messages: 超时，无新消息 from '%s'", display_name)
+            return (
+                f"⏱️ 监控 {display_name} 超时 ({max_timeout} 秒)，未收到新消息\n\n"
+                "如需继续监控，可再次调用此工具，或使用 read_messages 查看是否有遗漏消息"
+            )
+
+        time.sleep(poll_interval)
+
+        # 检查数据库变更（get_reader 自动检测 mtime，无变更时不重新解密）
+        try:
+            reader = get_reader()
+        except Exception:
+            # 数据库暂时不可用，下次循环再试
+            continue
+
+        # 轻量检查：读取最新一条消息
+        try:
+            current = reader.get_messages(talker_id, limit=1)
+            if not current:
+                continue
+
+            msg = current[0]
+            new_local_id = msg.get('local_id', 0)
+
+            if new_local_id > last_local_id:
+                # 检测到新消息！完整读取
+                all_msgs = reader.get_messages(talker_id, limit=30)
+                new_msgs = [m for m in all_msgs if m.get('local_id', 0) > last_local_id]
+
+                log.info("wait_for_new_messages: 检测到 %d 条新消息 from '%s'",
+                         len(new_msgs), display_name)
+
+                # ---- 格式化输出 ----
+                lines = [
+                    f"📨 收到 {display_name} 的新消息 ({len(new_msgs)} 条):",
+                    ""
+                ]
+                for m in reversed(new_msgs):
+                    content = str(m.get('content', '')) or ''
+                    msg_time = m.get('time', '')
+                    msg_type = m.get('type', 0)
+                    sender = m.get('real_sender_id', '') or ''
+                    t = _MSG_TYPE_LABELS.get(msg_type, f'type{msg_type}')
+                    if msg_type == 1:
+                        entry = f"  [{msg_time}]"
+                        if sender:
+                            entry += f" {sender}:"
+                        entry += f" {content[:200]}"
+                        lines.append(entry)
+                    else:
+                        lines.append(f"  [{msg_time}] [{t}] {content[:100]}")
+
+                return "\n".join(lines)
+        except Exception as e:
+            log.warning("wait_for_new_messages: 轮询异常（忽略）: %s", e)
+            continue
 
 
 @mcp.tool()
