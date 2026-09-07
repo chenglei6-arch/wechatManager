@@ -117,6 +117,17 @@ class TestWeChatReaderContacts(unittest.TestCase):
         self.assertEqual(len(contacts), 1)
         self.assertEqual(contacts[0]['username'], 'wxid_test1')
 
+    def test_get_contacts_search_by_username(self):
+        """支持按 username（wxid）精确搜索联系人"""
+        contacts = self.reader.get_contacts(keyword='wxid_test1')
+        self.assertEqual(len(contacts), 1)
+        self.assertEqual(contacts[0]['username'], 'wxid_test1')
+
+    def test_get_contacts_search_by_username_partial(self):
+        """支持按 username（wxid）部分匹配搜索联系人"""
+        contacts = self.reader.get_contacts(keyword='wxid_test')
+        self.assertEqual(len(contacts), 3)
+
     def test_get_contacts_no_system_accounts(self):
         """不应包含系统账号（notifymessage）"""
         contacts = self.reader.get_contacts()

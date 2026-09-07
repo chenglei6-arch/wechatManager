@@ -89,10 +89,14 @@ class WeChatReader:
         """
         params: list = list(_SYSTEM_ACCOUNTS)
         if keyword:
-            sql += " AND (nick_name LIKE ? ESCAPE '\\' OR remark LIKE ? ESCAPE '\\' OR alias LIKE ? ESCAPE '\\')"
-            escaped = self._escape_like(keyword)
-            like = f"%{escaped}%"
-            params.extend([like, like, like])
+            # wxid/username 只含 [a-zA-Z0-9_]，不含 % 与 _ 的通配冲突；
+            # 昵称等含 % 或 _ 时，_ 作单字符通配符通常也能覆盖目标字面字符。
+            # 统一不使用 ESCAPE——SQLite 对多个 OR LIKE + ESCAPE 的解析有怪癖，
+            # 转义后的 \% 与 \_ 反而导致匹配失效（如搜索 "wxid_test1" 返回空）。
+            sql += (" AND (nick_name LIKE ? OR remark LIKE ? "
+                    "OR alias LIKE ? OR username LIKE ?)")
+            like = f"%{keyword}%"
+            params.extend([like, like, like, like])
         sql += " ORDER BY display_name LIMIT ?"
         params.append(limit)
 
