@@ -4,6 +4,9 @@
 # ZCode project settings
 .zcode/
 
+# Temporary workspace
+tem/
+
 # WeChat decryption keys & decrypted data
 wx-mcp/keys.json
 wx-mcp/decrypted/
