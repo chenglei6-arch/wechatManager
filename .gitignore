@@ -1,6 +1,9 @@
 # Claude project settings
 .claude/
 
+# ZCode project settings
+.zcode/
+
 # WeChat decryption keys & decrypted data
 wx-mcp/keys.json
 wx-mcp/decrypted/
